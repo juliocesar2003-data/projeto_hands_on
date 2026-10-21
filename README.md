@@ -1,11 +1,11 @@
-# Pipeline de Câmbio e Vendas (BACEN + DummyJSON → GCS → BigQuery)
+# Pipeline de Câmbio e Indicadores Econômicos (BACEN)
 
-Pipeline de dados em camadas (bronze / silver / gold) que ingere cotações de câmbio da API do Banco Central do Brasil e dados de vendas simulados (DummyJSON), armazena em Google Cloud Storage e transforma no BigQuery até uma tabela final de vendas convertidas para BRL.
+Pipeline de dados em camadas (bronze / silver) que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, no período de 2016 a 2025. Possui duas implementações: GCP (Cloud Run + BigQuery, original) e Databricks (Unity Catalog + Spark Declarative Pipeline, atual — ver `databricks/README.md`).
 
-## Arquitetura
+## Arquitetura (GCP)
 
 ```
-APIs (BACEN / DummyJSON)
+API BACEN
         │
         ▼
   Cloud Run Functions  ──►  GCS (bronze, NDJSON)
@@ -15,42 +15,36 @@ APIs (BACEN / DummyJSON)
         │
         ▼
   BigQuery Tables (silver — tipagem, cast, limpeza)
-        │
-        ▼
-  BigQuery Tables (gold — conversão USD → BRL)
 ```
 
 ## Estrutura do repositório
 
 ```
+databricks/              # Versão Databricks (atual)
+  notebooks/              # Ingestão BACEN + explorador de séries
+  transformations/        # Fontes do Spark Declarative Pipeline
+    bronze/               # Streaming tables (Auto Loader)
+    silver/               # Materialized views
 cloud_run/
-  ingestao-api-bacen/     # Coleta cotações de câmbio (EUR, USD, GBP, JPY, ARS)
-  ingestao-api-dummy/     # Coleta dados de vendas (dummyjson.com/carts)
+  ingestao-api-bacen/     # Coleta cotações de câmbio (GCP, original)
 sql/
   bronze/                 # External tables sobre os arquivos NDJSON no GCS
   silver/                 # Tabelas limpas, tipadas
-  gold/                   # Tabela final de vendas convertida para BRL
 ```
 
-## Cloud Run Functions
+## Cloud Run Function
 
 ### `ingestao-api-bacen`
-Busca as séries históricas de câmbio (2023–2025) na API do BACEN para 5 moedas e grava um arquivo NDJSON por moeda em `gs://<bucket>/bronze/<moeda>_2023_2025.json`.
+Busca as séries históricas de câmbio (2016–2025) na API do BACEN para 5 moedas e grava um arquivo NDJSON por moeda em `gs://<bucket>/bronze/<moeda>_2016_2025.json`.
 
-### `ingestao-api-dummy`
-Busca os carrinhos de venda da API pública [dummyjson.com](https://dummyjson.com/carts) e grava um único NDJSON em `gs://<bucket>/bronze/vendas_usd.json`.
-
-> Ambas as funções gravam em formato **NDJSON** (um objeto JSON por linha), exigido pelo leitor de JSON do BigQuery — arrays JSON tradicionais (`[{...}, {...}]`) não são aceitos.
+> A função grava em formato **NDJSON** (um objeto JSON por linha), exigido pelo leitor de JSON do BigQuery — arrays JSON tradicionais (`[{...}, {...}]`) não são aceitos.
 
 ## Camadas SQL (BigQuery)
 
 | Camada | Arquivo | Descrição |
 |---|---|---|
 | Bronze | `01_ext_moedas.sql` | External tables sobre os 5 arquivos de câmbio |
-| Bronze | `02_ext_vendas.sql` | External table sobre o arquivo de vendas |
 | Silver | `01_moedas_conversao.sql` | Consolida e tipa as cotações (`NUMERIC`, `DATE`) |
-| Silver | `02_vendas.sql` | Tipagem de vendas: ids como `STRING`, valores monetários como `NUMERIC`, geração de `sales_date` simulada (a API de origem não possui data) |
-| Gold | `01_vendas.sql` | `UNNEST` dos produtos + join com cotações, gerando valores convertidos para BRL |
 
 ## Configuração
 
@@ -65,12 +59,11 @@ Este repositório não contém nomes reais de projeto/bucket — substitua os pl
 ## Como rodar
 
 1. Criar um bucket GCS próprio (nome globalmente único) com a estrutura `bronze/`.
-2. Deploy das Cloud Run Functions (`ingestao-api-bacen`, `ingestao-api-dummy`), definindo a env var `BUCKET_NAME` apontando para o bucket criado.
+2. Deploy da Cloud Run Function `ingestao-api-bacen`, definindo a env var `BUCKET_NAME` apontando para o bucket criado.
 3. Rodar os scripts em `sql/bronze/` (substituindo `{{PROJECT_ID}}` e `{{BUCKET_NAME}}` pelos seus valores).
 4. Rodar os scripts em `sql/silver/` (substituindo `{{PROJECT_ID}}`).
-5. Rodar os scripts em `sql/gold/` (substituindo `{{PROJECT_ID}}`).
 
 ## Observações
 
-- A data de venda (`sales_date`) é **simulada aleatoriamente** entre 2023-01-01 e 2025-12-31, pois a API de vendas usada (DummyJSON) não fornece datas reais — usada apenas para fins de prática de junção com a tabela de câmbio por data.
 - Nomes de bucket e dataset devem ser únicos/ajustados ao seu projeto antes de rodar os scripts.
+- No Databricks, a ingestão cobre também os indicadores econômicos (Selic 432, CDI 12, TR 226, IPCA 433) além das 5 moedas.
