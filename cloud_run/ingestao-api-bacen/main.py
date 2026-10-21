@@ -18,7 +18,7 @@ def ingestao_multi_moedas_bronze(request):
 
     params = {
         "formato": "json",
-        "dataInicial": "01/01/2023",
+        "dataInicial": "01/01/2016",
         "dataFinal": "31/12/2025"
     }
 
@@ -33,7 +33,7 @@ def ingestao_multi_moedas_bronze(request):
                 registros = response.json()
                 ndjson = "\n".join(json.dumps(r, ensure_ascii=False) for r in registros)
 
-                caminho_gcs = f"bronze/{moeda}_2023_2025.json"
+                caminho_gcs = f"bronze/{moeda}_2016_2025.json"
                 blob = bucket.blob(caminho_gcs)
                 blob.upload_from_string(
                     data=ndjson,
