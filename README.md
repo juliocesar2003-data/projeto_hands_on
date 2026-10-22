@@ -1,76 +1,76 @@
-# Pipeline de Câmbio e Vendas (BACEN + DummyJSON → GCS → BigQuery)
+# Pipeline de Câmbio e Indicadores Econômicos (BACEN)
 
-Pipeline de dados em camadas (bronze / silver / gold) que ingere cotações de câmbio da API do Banco Central do Brasil e dados de vendas simulados (DummyJSON), armazena em Google Cloud Storage e transforma no BigQuery até uma tabela final de vendas convertidas para BRL.
+Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, no período de 01/01/2016 a 31/12/2025.
 
 ## Arquitetura
 
 ```
-APIs (BACEN / DummyJSON)
-        │
-        ▼
-  Cloud Run Functions  ──►  GCS (bronze, NDJSON)
-        │
-        ▼
-  BigQuery External Tables (bronze)
-        │
-        ▼
-  BigQuery Tables (silver — tipagem, cast, limpeza)
-        │
-        ▼
-  BigQuery Tables (gold — conversão USD → BRL)
+BACEN API (9 séries SGS)
+      │
+      ▼
+Notebook de Ingestão ──── disparado por ──→ Job sob demanda (serverless)
+      │
+      ▼
+UC Volume: projeto_hands_on.bronze.raw (9 arquivos NDJSON)
+      │
+      ▼
+Spark Declarative Pipeline (serverless)
+      │
+      ├─ Bronze: streaming tables via Auto Loader
+      │    bronze_moedas (5 fluxos append, um por moeda)
+      │    bronze_selic, bronze_cdi, bronze_tr, bronze_ipca
+      │
+      └─ Silver: materialized views
+           silver.moedas_conversao — moedas tipadas com códigos ISO
+           silver.selic — mensal (agrupamento por mês, MAX, primeiro dia)
+           silver.cdi — mensal (agrupamento por mês, MAX, primeiro dia)
+           silver.tr — diário com data_ref + data_fim
+           silver.ipca — variação percentual mensal
 ```
 
 ## Estrutura do repositório
 
 ```
-cloud_run/
-  ingestao-api-bacen/     # Coleta cotações de câmbio (EUR, USD, GBP, JPY, ARS)
-  ingestao-api-dummy/     # Coleta dados de vendas (dummyjson.com/carts)
-sql/
-  bronze/                 # External tables sobre os arquivos NDJSON no GCS
-  silver/                 # Tabelas limpas, tipadas
-  gold/                   # Tabela final de vendas convertida para BRL
+databricks/
+├── notebooks/
+│   ├── ingestao_bacen.py            # Notebook de ingestão (BACEN API → NDJSON no UC Volume)
+│   └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
+└── transformations/
+    ├── bronze/
+    │   ├── bronze_moedas.py         # Streaming table de câmbio (5 fluxos append)
+    │   └── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
+    └── silver/
+        ├── silver_moedas_conversao.py  # Cotações de moedas tipadas
+        └── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
 ```
-
-## Cloud Run Functions
-
-### `ingestao-api-bacen`
-Busca as séries históricas de câmbio (2023–2025) na API do BACEN para 5 moedas e grava um arquivo NDJSON por moeda em `gs://<bucket>/bronze/<moeda>_2023_2025.json`.
-
-### `ingestao-api-dummy`
-Busca os carrinhos de venda da API pública [dummyjson.com](https://dummyjson.com/carts) e grava um único NDJSON em `gs://<bucket>/bronze/vendas_usd.json`.
-
-> Ambas as funções gravam em formato **NDJSON** (um objeto JSON por linha), exigido pelo leitor de JSON do BigQuery — arrays JSON tradicionais (`[{...}, {...}]`) não são aceitos.
-
-## Camadas SQL (BigQuery)
-
-| Camada | Arquivo | Descrição |
-|---|---|---|
-| Bronze | `01_ext_moedas.sql` | External tables sobre os 5 arquivos de câmbio |
-| Bronze | `02_ext_vendas.sql` | External table sobre o arquivo de vendas |
-| Silver | `01_moedas_conversao.sql` | Consolida e tipa as cotações (`NUMERIC`, `DATE`) |
-| Silver | `02_vendas.sql` | Tipagem de vendas: ids como `STRING`, valores monetários como `NUMERIC`, geração de `sales_date` simulada (a API de origem não possui data) |
-| Gold | `01_vendas.sql` | `UNNEST` dos produtos + join com cotações, gerando valores convertidos para BRL |
 
 ## Configuração
 
-Este repositório não contém nomes reais de projeto/bucket — substitua os placeholders abaixo antes de usar:
+1. Executar `databricks/notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, e buscar os dados brutos da API do BACEN.
+2. Criar um Spark Declarative Pipeline no Databricks apontando para o diretório `databricks/transformations/` como origem, com catálogo `projeto_hands_on`, schema `bronze` e compute serverless.
+3. Executar uma atualização do pipeline para materializar as tabelas bronze e silver.
 
-| Placeholder | Onde aparece | Como definir |
+## Séries do BACEN SGS utilizadas
+
+| Série | Código | Frequência |
 |---|---|---|
-| `{{PROJECT_ID}}` | arquivos `.sql` | substituir diretamente no texto antes de rodar |
-| `{{BUCKET_NAME}}` | arquivos `.sql` | substituir diretamente no texto antes de rodar |
-| `BUCKET_NAME` (env var) | `cloud_run/*/main.py` | definir como variável de ambiente no deploy da Cloud Run Function (`--set-env-vars BUCKET_NAME=seu-bucket`) |
+| EUR/BRL | 21619 | Diária |
+| USD/BRL | 1 | Diária |
+| GBP/BRL | 21623 | Diária |
+| JPY/BRL | 21621 | Diária |
+| ARS/BRL | 21632 | Diária |
+| Selic (meta Copom) | 432 | Diária (agrupada mensal) |
+| CDI | 12 | Diária (agrupada mensal) |
+| TR | 226 | Diária |
+| IPCA % | 433 | Mensal |
 
-## Como rodar
+## Job
 
-1. Criar um bucket GCS próprio (nome globalmente único) com a estrutura `bronze/`.
-2. Deploy das Cloud Run Functions (`ingestao-api-bacen`, `ingestao-api-dummy`), definindo a env var `BUCKET_NAME` apontando para o bucket criado.
-3. Rodar os scripts em `sql/bronze/` (substituindo `{{PROJECT_ID}}` e `{{BUCKET_NAME}}` pelos seus valores).
-4. Rodar os scripts em `sql/silver/` (substituindo `{{PROJECT_ID}}`).
-5. Rodar os scripts em `sql/gold/` (substituindo `{{PROJECT_ID}}`).
+O notebook de ingestão é executado por um Job sob demanda no Databricks (serverless, disparo manual).
 
 ## Observações
 
-- A data de venda (`sales_date`) é **simulada aleatoriamente** entre 2023-01-01 e 2025-12-31, pois a API de vendas usada (DummyJSON) não fornece datas reais — usada apenas para fins de prática de junção com a tabela de câmbio por data.
-- Nomes de bucket e dataset devem ser únicos/ajustados ao seu projeto antes de rodar os scripts.
+- O período de ingestão cobre 01/01/2016 a 31/12/2025.
+- Os arquivos NDJSON são gravados no Unity Catalog Volume `projeto_hands_on.bronze.raw`.
+- O pipeline utiliza Auto Loader para detectar novos arquivos automaticamente.
+- O catálogo, schema e volume são criados automaticamente na primeira execução do notebook.
