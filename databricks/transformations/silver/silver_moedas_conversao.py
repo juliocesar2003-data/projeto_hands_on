@@ -4,7 +4,7 @@ from pyspark.sql.functions import col, to_date, when
 
 @dp.materialized_view(
     name="projeto_hands_on.silver.moedas_conversao",
-    comment="Consolidated and typed currency exchange rates (EUR, USD, GBP, JPY, ARS)",
+    comment="Cotações de câmbio consolidadas e tipadas (EUR, USD, GBP, JPY, ARS)",
 )
 def moedas_conversao():
     return (

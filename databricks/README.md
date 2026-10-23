@@ -1,6 +1,6 @@
 # Pipeline de Câmbio e Indicadores Econômicos (BACEN) — Databricks
 
-Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, no período de 01/01/2016 a 31/12/2025.
+Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, cobrindo todo o histórico disponível desde a data mais antiga de cada série (a partir de 1980) até 31/12/2025. A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos.
 
 ## Arquitetura
 
@@ -45,7 +45,7 @@ transformations/
 
 ## Configuração
 
-1. Executar `notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, e buscar os dados brutos da API do BACEN.
+1. Executar `notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, e buscar todo o histórico disponível da API do BACEN em janelas de 10 anos.
 2. Criar um Spark Declarative Pipeline no Databricks apontando para o diretório `transformations/` como origem, com catálogo `projeto_hands_on`, schema `bronze` e compute serverless.
 3. Executar uma atualização do pipeline para materializar as tabelas bronze e silver.
 

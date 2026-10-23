@@ -1,6 +1,6 @@
 # Pipeline de Câmbio e Indicadores Econômicos (BACEN)
 
-Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, no período de 01/01/2016 a 31/12/2025.
+Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, cobrindo todo o histórico disponível desde a data mais antiga de cada série (a partir de 1980) até 31/12/2025. A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos.
 
 ## Arquitetura
 
@@ -46,7 +46,7 @@ databricks/
 
 ## Configuração
 
-1. Executar `databricks/notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, e buscar os dados brutos da API do BACEN.
+1. Executar `databricks/notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, e buscar todo o histórico disponível da API do BACEN em janelas de 10 anos.
 2. Criar um Spark Declarative Pipeline no Databricks apontando para o diretório `databricks/transformations/` como origem, com catálogo `projeto_hands_on`, schema `bronze` e compute serverless.
 3. Executar uma atualização do pipeline para materializar as tabelas bronze e silver.
 
@@ -70,7 +70,7 @@ O notebook de ingestão é executado por um Job sob demanda no Databricks (serve
 
 ## Observações
 
-- O período de ingestão cobre 01/01/2016 a 31/12/2025.
+- O período de ingestão cobre desde a data mais antiga disponível de cada série (IPCA desde 01/01/1980, dolar desde 28/11/1984, CDI desde 06/03/1986, etc.) até 31/12/2025.
 - Os arquivos NDJSON são gravados no Unity Catalog Volume `projeto_hands_on.bronze.raw`.
 - O pipeline utiliza Auto Loader para detectar novos arquivos automaticamente.
 - O catálogo, schema e volume são criados automaticamente na primeira execução do notebook.

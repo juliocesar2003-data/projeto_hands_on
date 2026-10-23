@@ -5,7 +5,7 @@ VOLUME_PATH = "/Volumes/projeto_hands_on/bronze/raw"
 
 dp.create_streaming_table(
     name="bronze_moedas",
-    comment="Raw currency exchange rate data from BACEN API (5 currencies: EUR, USD, GBP, JPY, ARS)",
+    comment="Dados brutos de cotações de câmbio da API do BACEN (5 moedas: EUR, USD, GBP, JPY, ARS)",
     schema="data STRING, valor STRING, moeda_arquivo STRING",
 )
 
