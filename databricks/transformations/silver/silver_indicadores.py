@@ -4,7 +4,7 @@ from pyspark.sql.functions import col, to_date, date_trunc, max as spark_max
 
 @dp.materialized_view(
     name="projeto_hands_on.silver.selic",
-    comment="Selic target rate, monthly (group by month, MAX value, first day as date)",
+    comment="Taxa Selic meta, mensal (agrupamento por mês, MAX, primeiro dia)",
 )
 def selic():
     return (
@@ -20,7 +20,7 @@ def selic():
 
 @dp.materialized_view(
     name="projeto_hands_on.silver.cdi",
-    comment="Daily CDI rate, monthly (group by month, MAX value, first day as date)",
+    comment="Taxa CDI diária, mensal (agrupamento por mês, MAX, primeiro dia)",
 )
 def cdi():
     return (
@@ -36,7 +36,7 @@ def cdi():
 
 @dp.materialized_view(
     name="projeto_hands_on.silver.tr",
-    comment="Daily TR rate (daily, includes period end date)",
+    comment="Taxa TR diária (inclui data de fim do período)",
 )
 def tr():
     return (
@@ -50,7 +50,7 @@ def tr():
 
 @dp.materialized_view(
     name="projeto_hands_on.silver.ipca",
-    comment="IPCA monthly % variation",
+    comment="Variação percentual mensal do IPCA",
 )
 def ipca():
     return (

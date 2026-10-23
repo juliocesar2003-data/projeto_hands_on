@@ -3,7 +3,7 @@ from pyspark import pipelines as dp
 VOLUME_PATH = "/Volumes/projeto_hands_on/bronze/raw"
 
 
-@dp.table(name="bronze_selic", comment="Raw Selic target rate from BACEN SGS code 432")
+@dp.table(name="bronze_selic", comment="Taxa Selic meta do BACEN SGS código 432")
 def bronze_selic():
     return (
         spark.readStream.format("cloudFiles")
@@ -13,7 +13,7 @@ def bronze_selic():
     )
 
 
-@dp.table(name="bronze_cdi", comment="Raw Daily CDI rate from BACEN SGS code 12")
+@dp.table(name="bronze_cdi", comment="Taxa CDI diária do BACEN SGS código 12")
 def bronze_cdi():
     return (
         spark.readStream.format("cloudFiles")
@@ -23,7 +23,7 @@ def bronze_cdi():
     )
 
 
-@dp.table(name="bronze_tr", comment="Raw Daily TR rate from BACEN SGS code 226")
+@dp.table(name="bronze_tr", comment="Taxa TR diária do BACEN SGS código 226")
 def bronze_tr():
     return (
         spark.readStream.format("cloudFiles")
@@ -33,7 +33,7 @@ def bronze_tr():
     )
 
 
-@dp.table(name="bronze_ipca", comment="Raw IPCA monthly variation from BACEN SGS code 433")
+@dp.table(name="bronze_ipca", comment="Variação mensal do IPCA do BACEN SGS código 433")
 def bronze_ipca():
     return (
         spark.readStream.format("cloudFiles")
