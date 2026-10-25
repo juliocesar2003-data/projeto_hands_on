@@ -1,6 +1,6 @@
 # Pipeline de Câmbio e Indicadores Econômicos (BACEN)
 
-Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, cobrindo todo o histórico disponível desde a data mais antiga de cada série (a partir de 1980) até 31/12/2025. A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos.
+Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, cobrindo todo o histórico disponível desde a data mais antiga de cada série (a partir de 1980) até a data atual. A carga histórica é feita uma única vez (até 31/12/2025, mais o complemento de 01/01/2026 até o dia da carga) e, a partir daí, uma ingestão diária agendada busca apenas os registros novos, sem repetição. A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos.
 
 ## Arquitetura
 
@@ -8,10 +8,14 @@ Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotaçõ
 BACEN API (9 séries SGS)
       │
       ▼
-Notebook de Ingestão ──── disparado por ──→ Job sob demanda (serverless)
+Carga histórica (one-off) ──── Job sob demanda (serverless)
+   ingestao_bacen.py: histórico até 31/12/2025 + 01/01/2026 até hoje
+      │
+Ingestão diária ──────────────── Job agendado diário (serverless)
+   ingestao_diaria_bacen.py: da última data gravada até hoje
       │
       ▼
-UC Volume: projeto_hands_on.bronze.raw (9 arquivos NDJSON)
+UC Volume: projeto_hands_on.bronze.raw (arquivos NDJSON por série)
       │
       ▼
 Spark Declarative Pipeline (serverless)
@@ -33,7 +37,8 @@ Spark Declarative Pipeline (serverless)
 ```
 databricks/
 ├── notebooks/
-│   ├── ingestao_bacen.py            # Notebook de ingestão (BACEN API → NDJSON no UC Volume)
+│   ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)
+│   ├── ingestao_diaria_bacen.py     # Ingestão diária incremental (somente registros novos)
 │   └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
 └── transformations/
     ├── bronze/
@@ -46,9 +51,10 @@ databricks/
 
 ## Configuração
 
-1. Executar `databricks/notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, e buscar todo o histórico disponível da API do BACEN em janelas de 10 anos.
+1. **Carga histórica (uma única vez):** executar `databricks/notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, buscar todo o histórico disponível da API do BACEN em janelas de 10 anos e complementar com os dados de 01/01/2026 até o dia da execução.
 2. Criar um Spark Declarative Pipeline no Databricks apontando para o diretório `databricks/transformations/` como origem, com catálogo `projeto_hands_on`, schema `bronze` e compute serverless.
 3. Executar uma atualização do pipeline para materializar as tabelas bronze e silver.
+4. **Ingestão diária:** criar o Job agendado descrito na seção [Jobs](#jobs).
 
 ## Séries do BACEN SGS utilizadas
 
@@ -64,13 +70,32 @@ databricks/
 | TR | 226 | Diária |
 | IPCA % | 433 | Mensal |
 
-## Job
+## Jobs
 
-O notebook de ingestão é executado por um Job sob demanda no Databricks (serverless, disparo manual).
+### Carga histórica (sob demanda)
+
+O notebook `databricks/notebooks/ingestao_bacen.py` é executado por um Job sob demanda (serverless, disparo manual), apenas na primeira carga ou para reconstruir o histórico.
+
+### Ingestão diária (agendada)
+
+Job para rodar sem acompanhamento, com a seguinte configuração recomendada:
+
+| Configuração | Valor |
+|---|---|
+| Tarefa 1 — `ingestao_diaria` | Notebook `databricks/notebooks/ingestao_diaria_bacen.py`, compute serverless |
+| Tarefa 2 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente da tarefa 1 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
+| Agendamento | Diário às 21:00, fuso `America/Sao_Paulo` (após a publicação da PTAX e dos indicadores do dia) |
+| Retentativas | 2 retentativas na tarefa 1, com intervalo de 10 minutos |
+| Notificações | E-mail em caso de falha |
+
+Como a ingestão diária sempre parte da última data gravada no volume, dias com falha ou sem execução são recuperados automaticamente na execução seguinte.
 
 ## Observações
 
-- O período de ingestão cobre desde a data mais antiga disponível de cada série (IPCA desde 01/01/1980, dolar desde 28/11/1984, CDI desde 06/03/1986, etc.) até 31/12/2025.
+- O período de ingestão cobre desde a data mais antiga disponível de cada série (IPCA desde 01/01/1980, dolar desde 28/11/1984, CDI desde 06/03/1986, etc.) até a data atual.
 - Os arquivos NDJSON são gravados no Unity Catalog Volume `projeto_hands_on.bronze.raw`.
 - O pipeline utiliza Auto Loader para detectar novos arquivos automaticamente.
 - O catálogo, schema e volume são criados automaticamente na primeira execução do notebook.
+- **Sem repetição:** a ingestão diária lê a última data de cada série diretamente dos arquivos do volume, busca a partir do dia seguinte e mantém apenas registros posteriores a essa data e até hoje. Cada execução grava um arquivo novo (`<serie>_diario_<timestamp>.json`) e nunca sobrescreve arquivos, então o Auto Loader ingere cada registro uma única vez.
+- A API do BACEN devolve registros fora do intervalo pedido (séries mensais retornam o mês anterior a `dataInicial`; a Selic meta publica datas futuras até a próxima reunião do Copom) e às vezes responde "sem dados" com HTTP 200. Os notebooks tratam esses casos; datas futuras não são gravadas.
+- **Reexecutar a carga histórica** apaga todos os arquivos do volume (inclusive os diários) e recria o histórico até o dia da execução. Nesse caso, é obrigatório fazer um *full refresh* do pipeline para não duplicar dados na bronze.
