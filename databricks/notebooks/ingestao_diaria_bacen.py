@@ -122,6 +122,18 @@ def buscar_janela(code, inicio, fim):
     return None
 
 
+def filtrar_novos(registros, ultima_data, hoje):
+    """Mantém só registros posteriores a ultima_data e até hoje, sem datas duplicadas."""
+    vistos = set()
+    filtrados = []
+    for record in registros:
+        data_ref = datetime.strptime(record["data"], "%d/%m/%Y").date()
+        if ultima_data < data_ref <= hoje and record["data"] not in vistos:
+            vistos.add(record["data"])
+            filtrados.append(record)
+    return filtrados
+
+
 summary = {}
 falhas = []
 
@@ -154,13 +166,7 @@ for serie, code in SERIES.items():
         time.sleep(2)
 
     # Mantém só o que é posterior à última data gravada e não é futuro, sem duplicatas
-    vistos = set()
-    filtrados = []
-    for record in novos:
-        data_ref = datetime.strptime(record["data"], "%d/%m/%Y").date()
-        if ultima_data < data_ref <= hoje and record["data"] not in vistos:
-            vistos.add(record["data"])
-            filtrados.append(record)
+    filtrados = filtrar_novos(novos, ultima_data, hoje)
 
     if filtrados:
         ndjson_content = "\n".join(json.dumps(record) for record in filtrados)

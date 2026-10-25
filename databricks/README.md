@@ -51,19 +51,21 @@ transformations/
 ## Configuração
 
 1. **Carga histórica (uma única vez):** executar `notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, buscar todo o histórico disponível da API do BACEN em janelas de 10 anos e complementar com os dados de 01/01/2026 até o dia da execução.
-2. Criar um Spark Declarative Pipeline no Databricks apontando para o diretório `transformations/` como origem, com catálogo `projeto_hands_on`, schema `bronze` e compute serverless.
+2. O Spark Declarative Pipeline (origem `transformations/`, catálogo `projeto_hands_on`, schema `bronze`, compute serverless) e os Jobs são criados pelo deploy do bundle (`databricks.yml` na raiz do repositório) — ver a seção *CI/CD* do [README principal](../README.md#cicd).
 3. Executar uma atualização do pipeline para materializar as tabelas bronze e silver.
-4. **Ingestão diária:** criar o Job agendado descrito na seção [Jobs](#jobs).
+4. **Ingestão diária:** o Job agendado descrito na seção [Jobs](#jobs) também é criado pelo deploy do bundle.
 
 ## Jobs
 
-### Carga histórica (sob demanda)
+Os Jobs e o pipeline são definidos como código em `databricks.yml` (raiz do repositório) e criados/atualizados automaticamente pelo CD.
 
-O notebook `notebooks/ingestao_bacen.py` é executado por um Job sob demanda (serverless, disparo manual), apenas na primeira carga ou para reconstruir o histórico.
+### Carga histórica (sob demanda) — `carga_historica_bacen`
 
-### Ingestão diária (agendada)
+Executa `notebooks/ingestao_bacen.py` (serverless, disparo manual), apenas na primeira carga ou para reconstruir o histórico.
 
-Job para rodar sem acompanhamento, com a seguinte configuração recomendada:
+### Ingestão diária (agendada) — `ingestao_diaria_bacen`
+
+Job para rodar sem acompanhamento, com a seguinte configuração:
 
 | Configuração | Valor |
 |---|---|
@@ -71,7 +73,8 @@ Job para rodar sem acompanhamento, com a seguinte configuração recomendada:
 | Tarefa 2 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente da tarefa 1 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
 | Agendamento | Diário às 21:00, fuso `America/Sao_Paulo` (após a publicação da PTAX e dos indicadores do dia) |
 | Retentativas | 2 retentativas na tarefa 1, com intervalo de 10 minutos |
-| Notificações | E-mail em caso de falha |
+| Notificações | E-mail em caso de falha (para o usuário dono do token usado no deploy) |
+| Execuções simultâneas | No máximo 1 |
 
 Como a ingestão diária sempre parte da última data gravada no volume, dias com falha ou sem execução são recuperados automaticamente na execução seguinte.
 
