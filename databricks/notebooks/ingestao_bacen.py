@@ -3,7 +3,9 @@
 # MAGIC %md
 # MAGIC # Ingestão API BACEN (Bronze) — Histórico Completo
 # MAGIC
-# MAGIC Este notebook busca cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil (BACEN), cobrindo todo o histórico disponível desde a data mais antiga de cada série até 31/12/2025.
+# MAGIC Este notebook busca cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil (BACEN), cobrindo todo o histórico disponível desde a data mais antiga de cada série até 31/12/2025, e em seguida complementa com os dados de 01/01/2026 até a data de execução.
+# MAGIC
+# MAGIC **Carga única (one-off).** Depois desta carga, a atualização diária é feita pelo notebook `ingestao_diaria_bacen.py`, que continua a partir da última data gravada no volume sem repetir registros. Reexecutar este notebook apaga todos os arquivos do volume (inclusive os diários) e recria o histórico até hoje — nesse caso, o pipeline precisa de um *full refresh* para não duplicar dados na bronze.
 # MAGIC
 # MAGIC A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos e consolidados em um único arquivo NDJSON por série, gravado em um volume do Unity Catalog. O pipeline Spark Declarative Pipeline usa Auto Loader para ingerir esses arquivos em tabelas Delta nas camadas bronze/silver.
 # MAGIC
@@ -216,6 +218,94 @@ print("\n=== Resumo da Ingestão — Indicadores ===")
 for name, count in summary.items():
     print(f"  {name}: {count} registros")
 print(f"  Total: {sum(summary.values())} registros em {len(summary)} séries")
+
+# COMMAND ----------
+
+# DBTITLE 1,Ingest BACEN 2026 Until Today
+import requests
+import json
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# Complemento do histórico: 01/01/2026 até hoje para as 9 séries (moedas + indicadores)
+series_2026 = {
+    "euro": 21619,
+    "dolar": 1,
+    "libra": 21623,
+    "iene": 21621,
+    "peso_argentino": 21632,
+    "selic": 432,
+    "cdi": 12,
+    "tr": 226,
+    "ipca": 433,
+}
+
+START_DATE = "01/01/2026"
+hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+END_DATE = hoje.strftime("%d/%m/%Y")
+volume_path = "/Volumes/projeto_hands_on/bronze/raw"
+headers = {"User-Agent": "Mozilla/5.0 (Databricks; BACEN data ingestion)"}
+
+summary = {}
+falhas = []
+
+for name, code in series_2026.items():
+    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
+    params = {"formato": "json", "dataInicial": START_DATE, "dataFinal": END_DATE}
+    print(f"\nBuscando {name} (código {code}, de {START_DATE} até {END_DATE})...", end=" ")
+
+    dados = None
+    sem_dados = False
+    for attempt in range(3):
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=60)
+            if response.status_code == 200:
+                resposta = response.json()
+                if isinstance(resposta, list):
+                    dados = resposta
+                    break
+                # A API às vezes responde "sem dados" com HTTP 200 e corpo {"erro": {"statusCode": 404, ...}}
+                if isinstance(resposta, dict) and resposta.get("erro", {}).get("statusCode") == 404:
+                    sem_dados = True
+                    break
+                print(f"resposta inesperada: {str(resposta)[:200]}", end=" ")
+            elif response.status_code == 404:
+                sem_dados = True
+                break
+            else:
+                print(f"HTTP {response.status_code}", end=" ")
+        except (requests.exceptions.RequestException, json.JSONDecodeError, ValueError):
+            print("erro de conexão", end=" ")
+        if attempt < 2:
+            print(f"tentando ({attempt+1}/3)...", end=" ")
+            time.sleep(5)
+
+    if dados is None and not sem_dados:
+        print("falha")
+        falhas.append(name)
+        continue
+
+    # A API pode devolver registros fora do intervalo (ex.: série mensal antes de dataInicial,
+    # Selic com datas futuras), então mantemos só 2026 até hoje
+    inicio = datetime.strptime(START_DATE, "%d/%m/%Y").date()
+    dados = [r for r in (dados or []) if inicio <= datetime.strptime(r["data"], "%d/%m/%Y").date() <= hoje]
+
+    ndjson_content = "\n".join(json.dumps(record) for record in dados)
+    file_path = f"{volume_path}/{name}_2026_{hoje.strftime('%Y%m%d')}.json"
+    dbutils.fs.put(file_path, ndjson_content, overwrite=True)
+
+    summary[name] = len(dados)
+    print(f"{len(dados)} registros gravados em {file_path}")
+    time.sleep(2)
+
+print("\n=== Resumo da Ingestão — 2026 até hoje ===")
+for name, count in summary.items():
+    print(f"  {name}: {count} registros")
+print(f"  Total: {sum(summary.values())} registros em {len(summary)} séries")
+
+if falhas:
+    raise RuntimeError(f"Falha ao buscar as séries: {', '.join(falhas)}. Reexecute esta célula.")
 
 # COMMAND ----------
 
