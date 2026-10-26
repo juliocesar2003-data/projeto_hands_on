@@ -191,7 +191,7 @@ for name, config in indicadores.items():
                         print(f"tentando ({attempt+1}/3)...", end=" ")
                         time.sleep(3)
             except (requests.exceptions.RequestException, json.JSONDecodeError, ValueError):
-                print(f"erro de conexão", end=" ")
+                print("erro de conexão", end=" ")
                 if attempt < 2:
                     print(f"tentando ({attempt+1}/3)...", end=" ")
                     time.sleep(5)

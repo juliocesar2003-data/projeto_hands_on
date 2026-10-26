@@ -1,0 +1,60 @@
+# Databricks Asset Bundle: defines the pipeline and jobs as code.
+# Deployed by GitHub Actions (.github/workflows/cd.yml) with `databricks bundle deploy -t prod`.
+# The workspace host and token come from the DATABRICKS_HOST / DATABRICKS_TOKEN environment variables.
+
+bundle:
+  name: projeto_hands_on
+
+sync:
+  exclude:
+    - tests/**
+    - .github/**
+
+resources:
+  pipelines:
+    pipeline_bacen:
+      name: Pipeline Câmbio - BACEN
+      catalog: projeto_hands_on
+      schema: bronze
+      serverless: true
+      libraries:
+        - glob:
+            include: ./databricks/transformations/**
+
+  jobs:
+    carga_historica_bacen:
+      name: carga_historica_bacen
+      description: Carga histórica one-off da API do BACEN (disparo manual).
+      tasks:
+        - task_key: carga_historica
+          notebook_task:
+            notebook_path: ./databricks/notebooks/ingestao_bacen.py
+
+    ingestao_diaria_bacen:
+      name: Ingestão Diária BACEN (Agendada)
+      description: Ingestão diária incremental da API do BACEN seguida da atualização do pipeline.
+      max_concurrent_runs: 1
+      schedule:
+        quartz_cron_expression: "0 0 21 * * ?"
+        timezone_id: America/Sao_Paulo
+        pause_status: UNPAUSED
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+      tasks:
+        - task_key: ingestao_diaria
+          notebook_task:
+            notebook_path: ./databricks/notebooks/ingestao_diaria_bacen.py
+          max_retries: 2
+          min_retry_interval_millis: 600000
+        - task_key: atualiza_pipeline
+          depends_on:
+            - task_key: ingestao_diaria
+          # Updates whatever was written even if one series failed
+          run_if: ALL_DONE
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.pipeline_bacen.id}
+
+targets:
+  prod:
+    default: true

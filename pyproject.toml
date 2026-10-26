@@ -1,0 +1,17 @@
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+# Objects injected by the Databricks runtime in notebooks and pipelines
+builtins = ["spark", "dbutils", "display"]
+
+[tool.ruff.lint]
+# Pyflakes (F) and syntax errors (E9): catches real bugs without enforcing a style
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Notebook cells are independent, so each one re-imports and redefines its helpers
+"databricks/notebooks/*.py" = ["F811"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
