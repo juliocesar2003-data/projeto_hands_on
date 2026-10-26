@@ -63,7 +63,7 @@ Os Jobs e o pipeline são definidos como código em `databricks.yml` (raiz do re
 
 Executa `notebooks/ingestao_bacen.py` (serverless, disparo manual), apenas na primeira carga ou para reconstruir o histórico.
 
-### Ingestão diária (agendada) — `ingestao_diaria_bacen`
+### Ingestão diária (agendada) — `ingestao_diaria_bacen` (*Ingestão Diária BACEN (Agendada)* no Databricks)
 
 Job para rodar sem acompanhamento, com a seguinte configuração:
 

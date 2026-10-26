@@ -85,7 +85,7 @@ Os Jobs e o pipeline são definidos como código em `databricks.yml` e criados/a
 
 Executa `databricks/notebooks/ingestao_bacen.py` (serverless, disparo manual), apenas na primeira carga ou para reconstruir o histórico.
 
-### Ingestão diária (agendada) — `ingestao_diaria_bacen`
+### Ingestão diária (agendada) — `ingestao_diaria_bacen` (*Ingestão Diária BACEN (Agendada)* no Databricks)
 
 Job para rodar sem acompanhamento, com a seguinte configuração:
 
@@ -127,7 +127,7 @@ Roda em todo push para branches diferentes da `main` e em todo pull request para
 
 ### CD — Entrega Contínua (`.github/workflows/cd.yml`)
 
-Roda a cada merge na `main` (ou manualmente em *Actions > CD > Run workflow*). Executa o CI e, se passar, faz `databricks bundle deploy -t prod`, que publica os notebooks e cria/atualiza o pipeline `pipeline_bacen` e os Jobs `carga_historica_bacen` e `ingestao_diaria_bacen`. O deploy não executa a carga nem o pipeline; ele só atualiza as definições.
+Roda a cada merge na `main` (ou manualmente em *Actions > CD > Run workflow*). Executa o CI e, se passar, faz `databricks bundle deploy -t prod`, que publica os notebooks e cria/atualiza o pipeline `pipeline_bacen` (*Pipeline Câmbio - BACEN* no Databricks) e os Jobs `carga_historica_bacen` e `ingestao_diaria_bacen` (*Ingestão Diária BACEN (Agendada)*). O deploy não executa a carga nem o pipeline; ele só atualiza as definições.
 
 ### Configuração inicial (uma única vez)
 

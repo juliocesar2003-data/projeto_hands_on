@@ -13,7 +13,7 @@ sync:
 resources:
   pipelines:
     pipeline_bacen:
-      name: pipeline_bacen
+      name: Pipeline Câmbio - BACEN
       catalog: projeto_hands_on
       schema: bronze
       serverless: true
@@ -31,7 +31,7 @@ resources:
             notebook_path: ./databricks/notebooks/ingestao_bacen.py
 
     ingestao_diaria_bacen:
-      name: ingestao_diaria_bacen
+      name: Ingestão Diária BACEN (Agendada)
       description: Ingestão diária incremental da API do BACEN seguida da atualização do pipeline.
       max_concurrent_runs: 1
       schedule:
