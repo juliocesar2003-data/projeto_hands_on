@@ -75,9 +75,12 @@ def tr():
     comment="Variação percentual mensal do IPCA",
 )
 def ipca():
+    # A carga histórica em janelas de 10 anos gravou em duplicidade o mês de início de cada janela
+    # (01/1990, 01/2000, 01/2010, 01/2020): em séries mensais a API devolve também o mês anterior a dataInicial
     return (
         spark.read.table("bronze_ipca")
         .withColumn("data_ref", to_date(col("data"), "dd/MM/yyyy"))
         .withColumn("valor", col("valor").cast("DECIMAL(18,6)"))
+        .dropDuplicates(["data_ref"])
         .select("data_ref", "valor")
     )

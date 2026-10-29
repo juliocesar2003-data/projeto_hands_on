@@ -73,3 +73,15 @@ def test_bundle_aponta_para_arquivos_existentes():
     assert diaria["schedule"]["timezone_id"] == "America/Sao_Paulo"
     assert [t["task_key"] for t in diaria["tasks"]] == ["ingestao_diaria", "atualiza_pipeline"]
     assert diaria["tasks"][1]["pipeline_task"]["pipeline_id"] == "${resources.pipelines.pipeline_bacen.id}"
+
+
+def test_eda_le_somente_tabelas_silver_do_pipeline():
+    eda = (NOTEBOOKS / "eda_bacen.py").read_text(encoding="utf-8")
+    lidas = set(re.findall(r'ler_silver\("(\w+)"', eda))
+
+    definidas = set()
+    for arquivo in (TRANSFORMATIONS / "silver").glob("*.py"):
+        definidas |= set(re.findall(r'name="projeto_hands_on\.silver\.(\w+)"', arquivo.read_text(encoding="utf-8")))
+
+    assert lidas == {"moedas_conversao", "selic", "cdi", "ipca", "tr"}
+    assert lidas <= definidas
