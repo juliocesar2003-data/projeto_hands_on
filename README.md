@@ -26,8 +26,8 @@ Spark Declarative Pipeline (serverless)
       │
       └─ Silver: materialized views
            silver.moedas_conversao — moedas tipadas com códigos ISO
-           silver.selic — mensal (agrupamento por mês, MAX, primeiro dia)
-           silver.cdi — mensal (agrupamento por mês, MAX, primeiro dia)
+           silver.selic — mensal (valor vigente no último dia do mês, % a.a.)
+           silver.cdi — mensal (média anualizada % a.a. + acumulado no mês)
            silver.tr — diário com data_ref + data_fim
            silver.ipca — variação percentual mensal
 ```
@@ -76,6 +76,17 @@ databricks/
 | CDI | 12 | Diária (agrupada mensal) |
 | TR | 226 | Diária |
 | IPCA % | 433 | Mensal |
+
+### Regras de agregação mensal (silver)
+
+| Série | Regra | Unidade |
+|---|---|---|
+| Selic | Valor vigente no último dia do mês | % a.a. |
+| CDI — `valor` | Taxa diária anualizada por `(1 + taxa/100)^252 − 1`, com média no mês | % a.a. (comparável à Selic) |
+| CDI — `acumulado_mes` | Taxas diárias compostas no mês: `∏(1 + taxa/100) − 1` | % no mês (comparável ao IPCA) |
+| CDI — `dias_uteis` | Quantidade de dias com taxa no mês | dias |
+
+O MAX mensal usado anteriormente distorcia os dados: nos meses com mudança da Selic pelo Copom, pegava a taxa anterior ao corte (ou a nova taxa, no caso de alta), e o CDI ficava em % ao dia, sem comparação possível com Selic e IPCA. Exemplo, agosto/2023 (corte de 13,75% para 13,25% em 02/08): a Selic passa de 13,75 para 13,25, e o CDI de 0,050788 (% a.d.) para 13,19% a.a. e 1,1375% no mês. O mês corrente é parcial: `acumulado_mes` reflete os dias úteis já publicados.
 
 ## Jobs
 
