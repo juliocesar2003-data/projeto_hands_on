@@ -46,6 +46,7 @@ databricks/
 ├── notebooks/
 │   ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)
 │   ├── ingestao_diaria_bacen.py     # Ingestão diária incremental (somente registros novos)
+│   ├── eda_bacen.py                 # Análise exploratória sobre as tabelas silver
 │   └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
 └── transformations/
     ├── bronze/
@@ -87,6 +88,22 @@ databricks/
 | CDI — `dias_uteis` | Quantidade de dias com taxa no mês | dias |
 
 O MAX mensal usado anteriormente distorcia os dados: nos meses com mudança da Selic pelo Copom, pegava a taxa anterior ao corte (ou a nova taxa, no caso de alta), e o CDI ficava em % ao dia, sem comparação possível com Selic e IPCA. Exemplo, agosto/2023 (corte de 13,75% para 13,25% em 02/08): a Selic passa de 13,75 para 13,25, e o CDI de 0,050788 (% a.d.) para 13,19% a.a. e 1,1375% no mês. O mês corrente é parcial: `acumulado_mes` reflete os dias úteis já publicados.
+
+## Análise exploratória
+
+O notebook `databricks/notebooks/eda_bacen.py` faz a análise exploratória lendo diretamente as tabelas `projeto_hands_on.silver`, então os resultados acompanham a ingestão diária. O período é definido pelos parâmetros `data_inicial` (padrão `2020-01-01`) e `data_final` (vazio = último mês completo).
+
+Conteúdo:
+
+- qualidade e cobertura das tabelas (nulos e chaves duplicadas);
+- base econômica mensal (Selic e CDI da silver, TR média mensal, IPCA e câmbio de fim de mês);
+- USD/BRL diário com média móvel, extremos e comparação das cinco moedas (Base 100, variação acumulada e volatilidade);
+- Selic × CDI, Selic × IPCA, juro real aproximado (CDI acumulado no mês − IPCA) e defasagem entre Selic e IPCA;
+- sazonalidade do IPCA por mês do calendário;
+- matriz de correlação em nível e em variação mensal;
+- conclusões e implicações para a camada gold e o modelo.
+
+Para executar, abra o notebook no workspace (ele é publicado pelo deploy do bundle em `.bundle/projeto_hands_on/prod/files/databricks/notebooks/`) e rode todas as células com compute serverless.
 
 ## Jobs
 
@@ -172,4 +189,5 @@ pytest -v
 - O catálogo, schema e volume são criados automaticamente na primeira execução do notebook.
 - **Sem repetição:** a ingestão diária lê a última data de cada série diretamente dos arquivos do volume, busca a partir do dia seguinte e mantém apenas registros posteriores a essa data e até hoje. Cada execução grava um arquivo novo (`<serie>_diario_<timestamp>.json`) e nunca sobrescreve arquivos, então o Auto Loader ingere cada registro uma única vez.
 - A API do BACEN devolve registros fora do intervalo pedido (séries mensais retornam o mês anterior a `dataInicial`; a Selic meta publica datas futuras até a próxima reunião do Copom) e às vezes responde "sem dados" com HTTP 200. Os notebooks tratam esses casos; datas futuras não são gravadas.
+- **IPCA:** a carga histórica em janelas de 10 anos gravou em duplicidade o mês de início de cada janela (01/1990, 01/2000, 01/2010 e 01/2020), porque em séries mensais a API devolve também o mês anterior a `dataInicial`. A `silver.ipca` remove essas duplicidades (`dropDuplicates` por `data_ref`).
 - **Reexecutar a carga histórica** apaga todos os arquivos do volume (inclusive os diários) e recria o histórico até o dia da execução. Nesse caso, é obrigatório fazer um *full refresh* do pipeline para não duplicar dados na bronze.
