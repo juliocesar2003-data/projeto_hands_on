@@ -30,6 +30,7 @@ Spark Declarative Pipeline (serverless)
            silver.cdi — mensal (média anualizada % a.a. + acumulado no mês)
            silver.tr — diário com data_ref + data_fim
            silver.ipca — variação percentual mensal
+           silver.dq_resumo — resumo de qualidade (unicidade e atualização)
 ```
 
 ## Estrutura do repositório
@@ -54,7 +55,8 @@ databricks/
     │   └── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
     └── silver/
         ├── silver_moedas_conversao.py  # Cotações de moedas tipadas
-        └── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
+        ├── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
+        └── silver_qualidade.py         # Resumo de qualidade (dq_resumo)
 ```
 
 ## Configuração
@@ -88,6 +90,46 @@ databricks/
 | CDI — `dias_uteis` | Quantidade de dias com taxa no mês | dias |
 
 O MAX mensal usado anteriormente distorcia os dados: nos meses com mudança da Selic pelo Copom, pegava a taxa anterior ao corte (ou a nova taxa, no caso de alta), e o CDI ficava em % ao dia, sem comparação possível com Selic e IPCA. Exemplo, agosto/2023 (corte de 13,75% para 13,25% em 02/08): a Selic passa de 13,75 para 13,25, e o CDI de 0,050788 (% a.d.) para 13,19% a.a. e 1,1375% no mês. O mês corrente é parcial: `acumulado_mes` reflete os dias úteis já publicados.
+
+## Qualidade de dados
+
+As regras de qualidade são *expectations* do Spark Declarative Pipeline: rodam sobre os dados reais a cada atualização, e o resultado de cada regra (registros aprovados e reprovados) fica no log de eventos e na aba *Data quality* de cada tabela do pipeline.
+
+### Níveis de severidade
+
+| Nível | Decorador | O que acontece na violação | Quando é usado |
+|---|---|---|---|
+| Registrar | `@dp.expect` / `expect_all` | O registro é mantido e a violação é contabilizada | Faixas de valores e dados brutos (bronze) |
+| Descartar | `@dp.expect_or_drop` | O registro é removido da tabela e contabilizado | Registros inutilizáveis (cotação zerada ou negativa) |
+| Interromper | `@dp.expect_or_fail` | A atualização do pipeline falha e o Job envia o e-mail de falha | Erros de carga ou de mapeamento que tornariam os dados errados |
+
+### Regras por tabela
+
+| Tabela | Regra | Nível |
+|---|---|---|
+| bronze (todas) | `data_valida`, `valor_numerico` | Registrar |
+| `bronze_moedas` | `cotacao_positiva` | Registrar |
+| `bronze_tr` | `periodo_valido` (`dataFim` > `data`) | Registrar |
+| `silver.moedas_conversao` | `moeda_conhecida`, `data_cotacao_valida` | Interromper |
+| `silver.moedas_conversao` | `cotacao_positiva` | Descartar |
+| `silver.selic` / `cdi` / `tr` / `ipca` | `data_ref_valida` | Interromper |
+| `silver.selic` | `faixa_plausivel` (0 a 100% a.a.) | Registrar |
+| `silver.cdi` | `taxas_nao_negativas`, `dias_uteis_no_mes` (1 a 23) | Registrar |
+| `silver.tr` | `taxa_nao_negativa`, `periodo_valido` | Registrar |
+| `silver.ipca` | `faixa_plausivel` (−5% a 100% no mês) | Registrar |
+| `silver.dq_resumo` | `chave_unica` (sem chaves duplicadas) | Interromper |
+| `silver.dq_resumo` | `dados_atualizados` (atraso dentro do limite) | Registrar |
+
+As faixas foram calibradas com o histórico completo: o dólar chegou a 71.153 (moeda anterior ao real), o IPCA a 82,39% em um mês (03/1990) e a TR é zero em boa parte do período recente, então valores altos ou zerados não são tratados como erro.
+
+### Resumo de qualidade (`silver.dq_resumo`)
+
+Tabela com uma linha por tabela silver, recalculada a cada atualização: `linhas`, `chaves_distintas`, `ultima_data`, `dias_desde_ultima_data`, `limite_atraso_dias` e `verificado_em`. Cobre o que as regras por registro não conseguem verificar:
+
+- **Unicidade da chave** (como os meses duplicados do IPCA): chave `data_ref` nas tabelas mensais, `moeda` + `data_cotacao` no câmbio e `data_ref` + `data_fim` na TR.
+- **Atualização dos dados:** até 7 dias para as séries diárias (feriados prolongados chegam a 5 dias sem cotação), 38 dias para Selic e CDI (datadas no dia 1 do mês) e 75 dias para o IPCA (publicado por volta do dia 10 do mês seguinte).
+
+Os testes do CI garantem que toda tabela silver tenha regras de qualidade e esteja coberta pelo `dq_resumo`.
 
 ## Análise exploratória
 

@@ -30,6 +30,7 @@ Spark Declarative Pipeline (serverless)
            silver.cdi — mensal (média anualizada % a.a. + acumulado no mês)
            silver.tr — diário com data_ref + data_fim
            silver.ipca — variação percentual mensal
+           silver.dq_resumo — resumo de qualidade (unicidade e atualização)
 ```
 
 ## Conteúdo
@@ -46,7 +47,8 @@ transformations/
 │   └── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
 └── silver/
     ├── silver_moedas_conversao.py  # Cotações de moedas tipadas
-    └── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
+    ├── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
+    └── silver_qualidade.py         # Resumo de qualidade (dq_resumo)
 ```
 
 ## Configuração
@@ -78,6 +80,10 @@ Job para rodar sem acompanhamento, com a seguinte configuração:
 | Execuções simultâneas | No máximo 1 |
 
 Como a ingestão diária sempre parte da última data gravada no volume, dias com falha ou sem execução são recuperados automaticamente na execução seguinte.
+
+## Qualidade de dados
+
+As regras de qualidade (*expectations*) e a tabela `silver.dq_resumo` estão descritas na seção *Qualidade de dados* do [README principal](../README.md#qualidade-de-dados).
 
 ## Séries do BACEN SGS utilizadas
 

@@ -7,6 +7,12 @@ dp.create_streaming_table(
     name="bronze_moedas",
     comment="Dados brutos de cotações de câmbio da API do BACEN (5 moedas: EUR, USD, GBP, JPY, ARS)",
     schema="data STRING, valor STRING, moeda_arquivo STRING",
+    # Apenas registram violações: a bronze guarda o dado bruto como veio da API
+    expect_all={
+        "data_valida": "try_to_date(data, 'dd/MM/yyyy') IS NOT NULL",
+        "valor_numerico": "try_cast(valor AS DOUBLE) IS NOT NULL",
+        "cotacao_positiva": "try_cast(valor AS DOUBLE) > 0",
+    },
 )
 
 
