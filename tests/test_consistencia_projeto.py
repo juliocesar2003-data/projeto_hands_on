@@ -17,7 +17,8 @@ SERIES = carregar_constante(DIARIA, "SERIES")
 def globs_do_pipeline():
     globs = []
     for arquivo in (TRANSFORMATIONS / "bronze").glob("*.py"):
-        globs += re.findall(r'"pathGlobFilter",\s*"([^"]+)"', arquivo.read_text(encoding="utf-8"))
+        # O glob aparece direto no .option("pathGlobFilter", ...) ou na chamada ler_arquivos("...")
+        globs += re.findall(r'(?:"pathGlobFilter",\s*|ler_arquivos\()"([^"]+)"', arquivo.read_text(encoding="utf-8"))
     return globs
 
 
@@ -108,3 +109,17 @@ def test_dq_resumo_cobre_todas_as_tabelas_silver():
     bloco = qualidade.split("TABELAS = {")[1].split("}")[0]
     cobertas = set(re.findall(r'"(\w+)":', bloco))
     assert cobertas == set(_materialized_views_silver()) - {"dq_resumo"}
+
+
+def test_toda_tabela_bronze_registra_origem_e_data_de_ingestao():
+    moedas = (TRANSFORMATIONS / "bronze" / "bronze_moedas.py").read_text(encoding="utf-8")
+    indicadores = (TRANSFORMATIONS / "bronze" / "bronze_indicadores.py").read_text(encoding="utf-8")
+
+    # Moedas: as colunas estão no schema da streaming table e em cada um dos 5 fluxos
+    assert "origem_ingestao STRING, data_ingestao TIMESTAMP, data_processamento TIMESTAMP" in moedas
+    assert moedas.count("*COLUNAS_INGESTAO") == moedas.count("@dp.append_flow") == 5
+
+    # Indicadores: toda tabela lê os arquivos pela função que adiciona as colunas
+    assert indicadores.count("return ler_arquivos(") == indicadores.count("@dp.table(") == 4
+    for coluna in ("origem_ingestao", "data_ingestao", "data_processamento"):
+        assert f'.withColumn("{coluna}"' in indicadores
