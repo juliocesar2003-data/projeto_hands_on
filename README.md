@@ -20,7 +20,7 @@ UC Volume: projeto_hands_on.bronze.raw (arquivos NDJSON por série)
       ▼
 Spark Declarative Pipeline (serverless)
       │
-      ├─ Bronze: streaming tables via Auto Loader
+      ├─ Bronze: streaming tables via Auto Loader (com origem e data de ingestão)
       │    bronze_moedas (5 fluxos append, um por moeda)
       │    bronze_selic, bronze_cdi, bronze_tr, bronze_ipca
       │
@@ -107,7 +107,7 @@ As regras de qualidade são *expectations* do Spark Declarative Pipeline: rodam 
 
 | Tabela | Regra | Nível |
 |---|---|---|
-| bronze (todas) | `data_valida`, `valor_numerico` | Registrar |
+| bronze (todas) | `data_valida`, `valor_numerico`, `origem_ingestao_preenchida` | Registrar |
 | `bronze_moedas` | `cotacao_positiva` | Registrar |
 | `bronze_tr` | `periodo_valido` (`dataFim` > `data`) | Registrar |
 | `silver.moedas_conversao` | `moeda_conhecida`, `data_cotacao_valida` | Interromper |
@@ -121,6 +121,18 @@ As regras de qualidade são *expectations* do Spark Declarative Pipeline: rodam 
 | `silver.dq_resumo` | `dados_atualizados` (atraso dentro do limite) | Registrar |
 
 As faixas foram calibradas com o histórico completo: o dólar chegou a 71.153 (moeda anterior ao real), o IPCA a 82,39% em um mês (03/1990) e a TR é zero em boa parte do período recente, então valores altos ou zerados não são tratados como erro.
+
+### Metadados de ingestão (bronze)
+
+Todas as tabelas bronze têm três colunas de linhagem, preenchidas pelo Auto Loader a partir dos metadados do arquivo lido:
+
+| Coluna | Origem | Significado |
+|---|---|---|
+| `origem_ingestao` | `_metadata.file_path` | Caminho do arquivo no volume. O nome indica a carga: `<serie>_<ano>_2025.json` (histórica), `<serie>_2026_<data>.json` (complemento de 2026) ou `<serie>_diario_<timestamp>.json` (diária) |
+| `data_ingestao` | `_metadata.file_modification_time` | Quando o arquivo foi gravado no volume pela ingestão (UTC). Não muda se a bronze for reprocessada |
+| `data_processamento` | `current_timestamp()` | Quando o pipeline leu o registro para a bronze (UTC). Muda em um *full refresh* |
+
+A regra de qualidade `origem_ingestao_preenchida` (nível registrar) verifica que toda linha nova tenha a origem preenchida.
 
 ### Resumo de qualidade (`silver.dq_resumo`)
 
@@ -232,4 +244,5 @@ pytest -v
 - **Sem repetição:** a ingestão diária lê a última data de cada série diretamente dos arquivos do volume, busca a partir do dia seguinte e mantém apenas registros posteriores a essa data e até hoje. Cada execução grava um arquivo novo (`<serie>_diario_<timestamp>.json`) e nunca sobrescreve arquivos, então o Auto Loader ingere cada registro uma única vez.
 - A API do BACEN devolve registros fora do intervalo pedido (séries mensais retornam o mês anterior a `dataInicial`; a Selic meta publica datas futuras até a próxima reunião do Copom) e às vezes responde "sem dados" com HTTP 200. Os notebooks tratam esses casos; datas futuras não são gravadas.
 - **IPCA:** a carga histórica em janelas de 10 anos gravou em duplicidade o mês de início de cada janela (01/1990, 01/2000, 01/2010 e 01/2020), porque em séries mensais a API devolve também o mês anterior a `dataInicial`. A `silver.ipca` remove essas duplicidades (`dropDuplicates` por `data_ref`).
+- **Metadados de ingestão em registros antigos:** as colunas de linhagem só são preenchidas nos registros lidos depois da sua criação. Para preenchê-las em todo o histórico, é preciso um *full refresh* das tabelas bronze, que relê todos os arquivos do volume (testado em um pipeline temporário: mesmas quantidades de linhas antes e depois).
 - **Reexecutar a carga histórica** apaga todos os arquivos do volume (inclusive os diários) e recria o histórico até o dia da execução. Nesse caso, é obrigatório fazer um *full refresh* do pipeline para não duplicar dados na bronze.

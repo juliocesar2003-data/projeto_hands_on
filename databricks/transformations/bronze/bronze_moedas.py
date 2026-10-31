@@ -1,17 +1,26 @@
 from pyspark import pipelines as dp
-from pyspark.sql.functions import lit
+from pyspark.sql.functions import col, current_timestamp, lit
 
 VOLUME_PATH = "/Volumes/projeto_hands_on/bronze/raw"
+
+# Linhagem de cada registro: arquivo do volume de onde veio, quando o arquivo foi gravado no volume pela
+# ingestão (não muda se a bronze for reprocessada) e quando o pipeline leu o registro
+COLUNAS_INGESTAO = [
+    col("_metadata.file_path").alias("origem_ingestao"),
+    col("_metadata.file_modification_time").alias("data_ingestao"),
+    current_timestamp().alias("data_processamento"),
+]
 
 dp.create_streaming_table(
     name="bronze_moedas",
     comment="Dados brutos de cotações de câmbio da API do BACEN (5 moedas: EUR, USD, GBP, JPY, ARS)",
-    schema="data STRING, valor STRING, moeda_arquivo STRING",
+    schema="data STRING, valor STRING, moeda_arquivo STRING, origem_ingestao STRING, data_ingestao TIMESTAMP, data_processamento TIMESTAMP",
     # Apenas registram violações: a bronze guarda o dado bruto como veio da API
     expect_all={
         "data_valida": "try_to_date(data, 'dd/MM/yyyy') IS NOT NULL",
         "valor_numerico": "try_cast(valor AS DOUBLE) IS NOT NULL",
         "cotacao_positiva": "try_cast(valor AS DOUBLE) > 0",
+        "origem_ingestao_preenchida": "origem_ingestao IS NOT NULL",
     },
 )
 
@@ -23,8 +32,7 @@ def euro_flow():
         .option("cloudFiles.format", "json")
         .option("pathGlobFilter", "euro_*.json")
         .load(VOLUME_PATH)
-        .select("data", "valor")
-        .withColumn("moeda_arquivo", lit("euro"))
+        .select("data", "valor", lit("euro").alias("moeda_arquivo"), *COLUNAS_INGESTAO)
     )
 
 
@@ -35,8 +43,7 @@ def dolar_flow():
         .option("cloudFiles.format", "json")
         .option("pathGlobFilter", "dolar_*.json")
         .load(VOLUME_PATH)
-        .select("data", "valor")
-        .withColumn("moeda_arquivo", lit("dolar"))
+        .select("data", "valor", lit("dolar").alias("moeda_arquivo"), *COLUNAS_INGESTAO)
     )
 
 
@@ -47,8 +54,7 @@ def libra_flow():
         .option("cloudFiles.format", "json")
         .option("pathGlobFilter", "libra_*.json")
         .load(VOLUME_PATH)
-        .select("data", "valor")
-        .withColumn("moeda_arquivo", lit("libra"))
+        .select("data", "valor", lit("libra").alias("moeda_arquivo"), *COLUNAS_INGESTAO)
     )
 
 
@@ -59,8 +65,7 @@ def iene_flow():
         .option("cloudFiles.format", "json")
         .option("pathGlobFilter", "iene_*.json")
         .load(VOLUME_PATH)
-        .select("data", "valor")
-        .withColumn("moeda_arquivo", lit("iene"))
+        .select("data", "valor", lit("iene").alias("moeda_arquivo"), *COLUNAS_INGESTAO)
     )
 
 
@@ -71,6 +76,5 @@ def peso_argentino_flow():
         .option("cloudFiles.format", "json")
         .option("pathGlobFilter", "peso_argentino_*.json")
         .load(VOLUME_PATH)
-        .select("data", "valor")
-        .withColumn("moeda_arquivo", lit("peso_argentino"))
+        .select("data", "valor", lit("peso_argentino").alias("moeda_arquivo"), *COLUNAS_INGESTAO)
     )
