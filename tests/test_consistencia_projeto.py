@@ -85,3 +85,26 @@ def test_eda_le_somente_tabelas_silver_do_pipeline():
 
     assert lidas == {"moedas_conversao", "selic", "cdi", "ipca", "tr"}
     assert lidas <= definidas
+
+
+def _materialized_views_silver():
+    """Returns {table name: source of its definition block} for every silver materialized view."""
+    blocos = {}
+    for arquivo in (TRANSFORMATIONS / "silver").glob("*.py"):
+        texto = arquivo.read_text(encoding="utf-8")
+        for bloco in texto.split("@dp.materialized_view(")[1:]:
+            nome = re.search(r'name="projeto_hands_on\.silver\.(\w+)"', bloco).group(1)
+            blocos[nome] = bloco.split("\ndef ")[0]
+    return blocos
+
+
+def test_toda_tabela_silver_tem_regras_de_qualidade():
+    for nome, bloco in _materialized_views_silver().items():
+        assert "@dp.expect" in bloco, f"silver.{nome} não tem regras de qualidade (@dp.expect...)"
+
+
+def test_dq_resumo_cobre_todas_as_tabelas_silver():
+    qualidade = (TRANSFORMATIONS / "silver" / "silver_qualidade.py").read_text(encoding="utf-8")
+    bloco = qualidade.split("TABELAS = {")[1].split("}")[0]
+    cobertas = set(re.findall(r'"(\w+)":', bloco))
+    assert cobertas == set(_materialized_views_silver()) - {"dq_resumo"}

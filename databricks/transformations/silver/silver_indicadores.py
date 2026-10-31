@@ -9,6 +9,9 @@ DIAS_UTEIS_ANO = 252
     name="projeto_hands_on.silver.selic",
     comment="Taxa Selic meta (% a.a.), mensal: valor vigente no último dia do mês, datado no primeiro dia",
 )
+@dp.expect_or_fail("data_ref_valida", "data_ref IS NOT NULL")
+# Desde 1999 a meta ficou entre 2% e 45% a.a.; fora disso, apenas registra para investigação
+@dp.expect("faixa_plausivel", "valor > 0 AND valor <= 100")
 def selic():
     # Último valor do mês em vez do MAX: o MAX pegava a taxa anterior ao corte nos meses de queda
     return (
@@ -30,6 +33,12 @@ def selic():
         "acumulado_mes = taxa acumulada no mês (% no mês), dias_uteis = dias com taxa no mês"
     ),
 )
+@dp.expect_or_fail("data_ref_valida", "data_ref IS NOT NULL")
+# Valores muito altos são válidos no período de hiperinflação (até ~1,8 milhão % a.a. anualizado), então só exige não negativos
+@dp.expect_all({
+    "taxas_nao_negativas": "valor >= 0 AND acumulado_mes >= 0",
+    "dias_uteis_no_mes": "dias_uteis BETWEEN 1 AND 23",
+})
 def cdi():
     # A série 12 é uma taxa diária (% a.d.): anualiza para comparar com a Selic e
     # compõe os dias do mês para comparar com o IPCA (% a.m.)
@@ -60,6 +69,12 @@ def cdi():
     name="projeto_hands_on.silver.tr",
     comment="Taxa TR diária (inclui data de fim do período)",
 )
+@dp.expect_or_fail("data_ref_valida", "data_ref IS NOT NULL")
+# TR igual a zero é válida (calculada como zero quando a Selic está baixa)
+@dp.expect_all({
+    "taxa_nao_negativa": "valor >= 0",
+    "periodo_valido": "data_fim > data_ref",
+})
 def tr():
     return (
         spark.read.table("bronze_tr")
@@ -74,6 +89,9 @@ def tr():
     name="projeto_hands_on.silver.ipca",
     comment="Variação percentual mensal do IPCA",
 )
+@dp.expect_or_fail("data_ref_valida", "data_ref IS NOT NULL")
+# Inclui o período de hiperinflação (máximo de 82,39% em 03/1990) e deflações pontuais
+@dp.expect("faixa_plausivel", "valor BETWEEN -5 AND 100")
 def ipca():
     # A carga histórica em janelas de 10 anos gravou em duplicidade o mês de início de cada janela
     # (01/1990, 01/2000, 01/2010, 01/2020): em séries mensais a API devolve também o mês anterior a dataInicial
