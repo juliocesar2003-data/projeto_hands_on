@@ -81,7 +81,7 @@ for serie in SERIES:
 
 # DBTITLE 1,Ingest New Records
 def gerar_janelas_10_anos(inicio, fim):
-    """Divide um intervalo de datas (date) em janelas de no máximo 10 anos."""
+    """Divide um intervalo de datas (date) em janelas de no máximo 10 anos, sempre com fim depois do início."""
     janelas = []
     atual = inicio
     while atual <= fim:
@@ -90,7 +90,9 @@ def gerar_janelas_10_anos(inicio, fim):
         except ValueError:
             proximo = atual.replace(year=atual.year + 10, day=28)
         proximo = min(proximo, fim)
-        janelas.append((atual, proximo))
+        # A API responde HTTP 400 ("DataFinal deve ser maior que dataInicial") para janela de um dia:
+        # começa um dia antes; o dia extra já foi gravado e é descartado por filtrar_novos
+        janelas.append((atual - timedelta(days=1) if proximo == atual else atual, proximo))
         atual = proximo + timedelta(days=1)
     return janelas
 
