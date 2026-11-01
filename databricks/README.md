@@ -1,6 +1,6 @@
 # Pipeline de Câmbio e Indicadores Econômicos (BACEN) — Databricks
 
-Pipeline de dados em camadas (bronze / silver) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, cobrindo todo o histórico disponível desde a data mais antiga de cada série (a partir de 1980) até a data atual. A carga histórica é feita uma única vez (até 31/12/2025, mais o complemento de 01/01/2026 até o dia da carga) e, a partir daí, uma ingestão diária agendada busca apenas os registros novos, sem repetição. A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos.
+Pipeline de dados em camadas (bronze / silver / gold) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, cobrindo todo o histórico disponível desde a data mais antiga de cada série (a partir de 1980) até a data atual. A carga histórica é feita uma única vez (até 31/12/2025, mais o complemento de 01/01/2026 até o dia da carga) e, a partir daí, uma ingestão diária agendada busca apenas os registros novos, sem repetição. A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos.
 
 ## Arquitetura
 
@@ -24,13 +24,17 @@ Spark Declarative Pipeline (serverless)
       │    bronze_moedas (5 fluxos append, um por moeda)
       │    bronze_selic, bronze_cdi, bronze_tr, bronze_ipca
       │
-      └─ Silver: materialized views
-           silver.moedas_conversao — moedas tipadas com códigos ISO
-           silver.selic — mensal (valor vigente no último dia do mês, % a.a.)
-           silver.cdi — mensal (média anualizada % a.a. + acumulado no mês)
-           silver.tr — diário com data_ref + data_fim
-           silver.ipca — variação percentual mensal
-           silver.dq_resumo — resumo de qualidade (unicidade e atualização)
+      ├─ Silver: materialized views
+      │    silver.moedas_conversao — moedas tipadas com códigos ISO
+      │    silver.selic — mensal (valor vigente no último dia do mês, % a.a.)
+      │    silver.cdi — mensal (média anualizada % a.a. + acumulado no mês)
+      │    silver.tr — diário com data_ref + data_fim
+      │    silver.ipca — variação percentual mensal
+      │    silver.dq_resumo — resumo de qualidade (unicidade e atualização)
+      │
+      └─ Gold: materialized views
+           gold.metas_inflacao — metas de inflação do CMN por ano
+           gold.features_mensal — base do modelo de previsão do IPCA (features + alvos h1 a h12)
 ```
 
 ## Conteúdo
@@ -45,17 +49,19 @@ transformations/
 ├── bronze/
 │   ├── bronze_moedas.py         # Streaming table de câmbio (5 fluxos append)
 │   └── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
-└── silver/
-    ├── silver_moedas_conversao.py  # Cotações de moedas tipadas
-    ├── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
-    └── silver_qualidade.py         # Resumo de qualidade (dq_resumo)
+├── silver/
+│   ├── silver_moedas_conversao.py  # Cotações de moedas tipadas
+│   ├── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
+│   └── silver_qualidade.py         # Resumo de qualidade (dq_resumo)
+└── gold/
+    └── gold_features.py            # Metas de inflação e base do modelo (features_mensal)
 ```
 
 ## Configuração
 
 1. **Carga histórica (uma única vez):** executar `notebooks/ingestao_bacen.py` (ou disparar o Job sob demanda) para criar o catálogo `projeto_hands_on`, o schema `bronze` e o volume `raw`, buscar todo o histórico disponível da API do BACEN em janelas de 10 anos e complementar com os dados de 01/01/2026 até o dia da execução.
 2. O Spark Declarative Pipeline (origem `transformations/`, catálogo `projeto_hands_on`, schema `bronze`, compute serverless) e os Jobs são criados pelo deploy do bundle (`databricks.yml` na raiz do repositório) — ver a seção *CI/CD* do [README principal](../README.md#cicd).
-3. Executar uma atualização do pipeline para materializar as tabelas bronze e silver.
+3. Executar uma atualização do pipeline para materializar as tabelas bronze, silver e gold.
 4. **Ingestão diária:** o Job agendado descrito na seção [Jobs](#jobs) também é criado pelo deploy do bundle.
 
 ## Jobs
@@ -80,6 +86,10 @@ Job para rodar sem acompanhamento, com a seguinte configuração:
 | Execuções simultâneas | No máximo 1 |
 
 Como a ingestão diária sempre parte da última data gravada no volume, dias com falha ou sem execução são recuperados automaticamente na execução seguinte.
+
+## Camada gold
+
+A granularidade, as colunas e as metas de inflação de `gold.features_mensal` estão descritas na seção *Camada gold* do [README principal](../README.md#camada-gold--base-do-modelo-goldfeatures_mensal).
 
 ## Qualidade de dados
 

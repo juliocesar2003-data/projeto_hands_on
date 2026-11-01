@@ -88,20 +88,27 @@ def test_eda_le_somente_tabelas_silver_do_pipeline():
     assert lidas <= definidas
 
 
-def _materialized_views_silver():
-    """Returns {table name: source of its definition block} for every silver materialized view."""
+def _materialized_views(camada):
+    """Returns {table name: source of its definition block} for every materialized view of a layer."""
     blocos = {}
-    for arquivo in (TRANSFORMATIONS / "silver").glob("*.py"):
+    for arquivo in (TRANSFORMATIONS / camada).glob("*.py"):
         texto = arquivo.read_text(encoding="utf-8")
         for bloco in texto.split("@dp.materialized_view(")[1:]:
-            nome = re.search(r'name="projeto_hands_on\.silver\.(\w+)"', bloco).group(1)
+            nome = re.search(rf'name="projeto_hands_on\.{camada}\.(\w+)"', bloco).group(1)
             blocos[nome] = bloco.split("\ndef ")[0]
     return blocos
 
 
-def test_toda_tabela_silver_tem_regras_de_qualidade():
-    for nome, bloco in _materialized_views_silver().items():
-        assert "@dp.expect" in bloco, f"silver.{nome} não tem regras de qualidade (@dp.expect...)"
+def _materialized_views_silver():
+    return _materialized_views("silver")
+
+
+@pytest.mark.parametrize("camada", ["silver", "gold"])
+def test_toda_tabela_tem_regras_de_qualidade(camada):
+    blocos = _materialized_views(camada)
+    assert blocos
+    for nome, bloco in blocos.items():
+        assert "@dp.expect" in bloco, f"{camada}.{nome} não tem regras de qualidade (@dp.expect...)"
 
 
 def test_dq_resumo_cobre_todas_as_tabelas_silver():
