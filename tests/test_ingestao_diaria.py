@@ -16,9 +16,17 @@ def funcoes():
 # --- gerar_janelas_10_anos -------------------------------------------------------------
 
 
-def test_janela_de_um_dia(funcoes):
-    dia = date(2026, 10, 24)
-    assert funcoes["gerar_janelas_10_anos"](dia, dia) == [(dia, dia)]
+def test_janela_de_um_dia_comeca_um_dia_antes(funcoes):
+    # Ingestão às 21h de 31/10 com 30/10 já gravado: a API recusa dataInicial = dataFinal com HTTP 400,
+    # então a janela começa no dia anterior, que já está gravado e é descartado por filtrar_novos
+    dia = date(2026, 10, 31)
+    assert funcoes["gerar_janelas_10_anos"](dia, dia) == [(dia - timedelta(days=1), dia)]
+
+
+def test_janela_final_de_um_dia_tambem_comeca_um_dia_antes(funcoes):
+    inicio = date(2016, 1, 1)
+    janelas = funcoes["gerar_janelas_10_anos"](inicio, date(2026, 1, 2))
+    assert janelas == [(inicio, date(2026, 1, 1)), (date(2026, 1, 1), date(2026, 1, 2))]
 
 
 def test_intervalo_curto_gera_uma_janela(funcoes):
