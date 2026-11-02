@@ -11,6 +11,7 @@
 # MAGIC | `media_movel_3m`, `_6m`, `_12m` | Referência | Média do IPCA dos últimos 3, 6 ou 12 meses, repetida para os meses seguintes |
 # MAGIC | `sazonal` | Referência | Média histórica do mês do calendário previsto |
 # MAGIC | `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA, com a ordem escolhida por AIC antes do primeiro ano de teste |
+# MAGIC | `sarimax`, `sarimax_ampliado` | Série temporal | O mesmo SARIMA com variáveis externas do mês anterior: juro real e dólar (e, no ampliado, variação da Selic e do dólar em 3 meses). Nas previsões, elas ficam constantes no último valor conhecido, como num cenário do simulador |
 # MAGIC | `ridge` | Regressão | Regressão linear com regularização; os coeficientes vão para `gold.coeficientes_modelo`, base do simulador |
 # MAGIC | `random_forest` | Regressão | Comparação não linear com todas as features |
 # MAGIC
@@ -18,7 +19,7 @@
 # MAGIC
 # MAGIC **Previsão atual:** os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente. A faixa de incerteza (80%) vem dos erros do Ridge em todos os anos de teste.
 # MAGIC
-# MAGIC Tabelas gravadas: `gold.coeficientes_modelo`, `gold.metricas_modelo` e `gold.previsoes_ipca`.
+# MAGIC Tabelas gravadas: `gold.coeficientes_modelo`, `gold.parametros_sarimax`, `gold.metricas_modelo` e `gold.previsoes_ipca`.
 
 # COMMAND ----------
 
@@ -27,6 +28,8 @@
 dbutils.widgets.text("origem", "projeto_hands_on.gold.features_mensal", "Tabela de features")
 dbutils.widgets.text("destino", "projeto_hands_on.gold", "Catálogo.schema de destino")
 dbutils.widgets.text("prefixo_tabela", "", "Prefixo das tabelas de saída")
+# "sim" retreina mesmo sem IPCA novo (por exemplo, depois de mudar o código do modelo)
+dbutils.widgets.dropdown("forcar_treino", "nao", ["nao", "sim"], "Retreinar sem IPCA novo")
 
 # COMMAND ----------
 
@@ -38,7 +41,7 @@ from datetime import datetime, timezone
 import mlflow
 import numpy as np
 import pandas as pd
-from pyspark.sql.functions import col, isnan, when
+from pyspark.sql.functions import col, date_trunc, isnan, max_by, when
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import TimeSeriesSplit
@@ -49,12 +52,17 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 ORIGEM = dbutils.widgets.get("origem").strip()
 DESTINO = dbutils.widgets.get("destino").strip()
 PREFIXO = dbutils.widgets.get("prefixo_tabela").strip()
+FORCAR_TREINO = dbutils.widgets.get("forcar_treino") == "sim"
 IPCA_SILVER = "projeto_hands_on.silver.ipca"
+SELIC_SILVER = "projeto_hands_on.silver.selic"
+MOEDAS_SILVER = "projeto_hands_on.silver.moedas_conversao"
 
 # Primeiro ano de teste: a tabela de features começa em 2001, então o primeiro treino tem 4 anos
 PRIMEIRO_ANO_TESTE = 2005
 # Histórico do IPCA para o ARIMA e as médias móveis: depois da estabilização do Plano Real
 INICIO_HISTORICO_IPCA = "1997-01-01"
+# Histórico do SARIMAX: a Selic meta começa em 03/1999, e o juro real usa a Selic do mês anterior
+INICIO_SARIMAX = "2000-01-01"
 # Períodos de leitura dos resultados, pelo mês previsto
 PERIODOS = {
     "2005-2016": ("2005-01-01", "2016-12-01"),
@@ -68,8 +76,14 @@ HORIZONTES = list(range(1, 13))
 # Nome do alvo -> coluna da features_mensal
 ALVOS = {**{f"h{h}": f"alvo_ipca_h{h}" for h in HORIZONTES}, "acum_12m": "alvo_ipca_acum_12m"}
 MEDIAS_MOVEIS = [3, 6, 12]
-MODELOS = ["ultimo_mes", "media_movel_3m", "media_movel_6m", "media_movel_12m", "sazonal", "arima", "ridge",
-           "random_forest"]
+# Variáveis externas de cada SARIMAX, sempre do mês anterior ao IPCA explicado (mesmas definições da features_mensal)
+EXOGENAS_SARIMAX = {
+    "sarimax": ["juro_real_12m", "usd_var_12m"],
+    "sarimax_ampliado": ["juro_real_12m", "selic_var_12m_pp", "usd_var_3m", "usd_var_12m"],
+}
+SERIES_TEMPORAIS = ["arima", *EXOGENAS_SARIMAX]
+MODELOS = ["ultimo_mes", "media_movel_3m", "media_movel_6m", "media_movel_12m", "sazonal", *SERIES_TEMPORAIS,
+           "ridge", "random_forest"]
 
 # Features do Ridge: poucas, interpretáveis e calculáveis a partir dos parâmetros do simulador (Selic e dólar).
 # "ipca_sazonal" é a média histórica do mês previsto (ipca_sazonal_hN do horizonte, ou a composta dos 12 meses).
@@ -167,10 +181,21 @@ def periodo_de(mes_previsto):
     return None
 
 
-def ajustar_arima(serie, ordem, sazonal):
+def exogenas_mensais(ipca, selic, usd):
+    """Monthly external variables, aligned with the gold.features_mensal definitions, indexed by month."""
+    acum_12m = (np.exp(np.log1p(ipca / 100).rolling(12).sum()) - 1) * 100
+    return pd.DataFrame({
+        "juro_real_12m": selic - acum_12m,
+        "selic_var_12m_pp": selic - selic.shift(12),
+        "usd_var_3m": (usd / usd.shift(3) - 1) * 100,
+        "usd_var_12m": (usd / usd.shift(12) - 1) * 100,
+    })
+
+
+def ajustar_arima(serie, ordem, sazonal, exog=None):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return SARIMAX(serie, order=ordem, seasonal_order=sazonal, trend="c").fit(disp=False)
+        return SARIMAX(serie, exog=exog, order=ordem, seasonal_order=sazonal, trend="c").fit(disp=False)
 
 
 def escolher_ordem_arima(serie):
@@ -180,17 +205,49 @@ def escolher_ordem_arima(serie):
     return ordem, sazonal
 
 
-def previsoes_arima(serie, ordem, sazonal, fim_treino, origens):
-    """Fits the ARIMA on the series up to fim_treino and, keeping those parameters, forecasts the next 12
-    months from each origin using only the data up to that origin. Returns {origin: array of 12 forecasts}."""
-    ajuste = ajustar_arima(serie[serie.index <= fim_treino], ordem, sazonal)
+def alinhar_exogenas(serie, exog):
+    """Pairs the IPCA of month t with exog of t-1, keeping only months where every variable exists."""
+    defasadas = exog.shift(1).reindex(serie.index)
+    serie = serie[defasadas.notna().all(axis=1)]
+    return serie, defasadas.loc[serie.index]
+
+
+def previsoes_arima(serie, ordem, sazonal, fim_treino, origens, exog=None):
+    """Fits the (S)ARIMA(X) on the series up to fim_treino and, keeping those parameters, forecasts the next 12
+    months from each origin using only the data up to that origin. Returns {origin: array of 12 forecasts}.
+
+    exog (optional) holds the external variables by month; the IPCA of month t is explained by exog of t-1,
+    and in the forecast the last known values stay constant, as in a simulator scenario.
+    """
+    defasadas = None
+    if exog is not None:
+        serie, defasadas = alinhar_exogenas(serie, exog)
+
+    def ate(dados, mes):
+        return None if dados is None else dados[dados.index <= mes]
+
+    ajuste = ajustar_arima(ate(serie, fim_treino), ordem, sazonal, ate(defasadas, fim_treino))
     previsoes = {}
     for origem in origens:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            filtrado = ajuste.apply(serie[serie.index <= origem])
-        previsoes[origem] = np.asarray(filtrado.forecast(12), dtype=float)
+            filtrado = ajuste.apply(ate(serie, origem), exog=ate(defasadas, origem))
+            futuras = None if exog is None else np.tile(exog.loc[origem].to_numpy(dtype=float), (12, 1))
+            previsoes[origem] = np.asarray(filtrado.forecast(12, exog=futuras), dtype=float)
     return previsoes
+
+
+def parametros_sarimax(ajuste):
+    """Coefficients of a fitted SARIMAX with standard error, p-value and 95% interval."""
+    intervalo = ajuste.conf_int()
+    return pd.DataFrame({
+        "parametro": ajuste.params.index,
+        "coeficiente": ajuste.params.to_numpy(dtype=float),
+        "erro_padrao": ajuste.bse.to_numpy(dtype=float),
+        "p_valor": ajuste.pvalues.to_numpy(dtype=float),
+        "ic95_inferior": intervalo.iloc[:, 0].to_numpy(dtype=float),
+        "ic95_superior": intervalo.iloc[:, 1].to_numpy(dtype=float),
+    })
 
 
 def previsao_arima_alvo(previsoes, origem, alvo):
@@ -242,6 +299,22 @@ assert serie_ipca.notna().all(), "Há meses sem IPCA no histórico"
 
 features = features.join(medias_moveis(serie_ipca, MEDIAS_MOVEIS), on="mes_base")
 
+
+def mensal(pdf, coluna):
+    return pdf.set_index(pd.to_datetime(pdf["data_ref"]))[coluna].sort_index().reindex(serie_ipca.index)
+
+
+selic = spark.read.table(SELIC_SILVER).select("data_ref", col("valor").cast("double").alias("selic")).toPandas()
+usd = (
+    spark.read.table(MOEDAS_SILVER)
+    .filter(col("moeda") == "USD")
+    .groupBy(date_trunc("month", "data_cotacao").cast("date").alias("data_ref"))
+    .agg(max_by(col("valor_brl").cast("double"), "data_cotacao").alias("usd"))
+    .toPandas()
+)
+exogenas = exogenas_mensais(serie_ipca, mensal(selic, "selic"), mensal(usd, "usd"))
+serie_sarimax = serie_ipca[serie_ipca.index >= INICIO_SARIMAX]
+
 linha_atual = features[features["conjunto"] == "previsao"]
 assert len(linha_atual) == 1, f"Esperada uma linha de previsão em {ORIGEM}, encontradas {len(linha_atual)}"
 assert features["features_completas"].all(), "Há meses base com features nulas na tabela de origem"
@@ -250,6 +323,22 @@ assert serie_ipca.index[-1] == mes_base_atual, "O último IPCA da silver não é
 anos_teste = list(range(PRIMEIRO_ANO_TESTE, mes_base_atual.year + 1))
 print(f"{len(features)} meses base, de {features['mes_base'].min():%m/%Y} a {mes_base_atual:%m/%Y}")
 print(f"Anos de teste: {anos_teste[0]} a {anos_teste[-1]}; previsão a partir de {mes_base_atual:%m/%Y}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Skip When There Is No New IPCA
+# A validação leva mais de 10 minutos e só muda quando sai um IPCA novo (uma vez por mês). Nos outros dias o Job
+# termina aqui, mantendo as tabelas do último treino.
+tabela_previsoes = f"{DESTINO}.{PREFIXO}previsoes_ipca"
+if not FORCAR_TREINO and spark.catalog.tableExists(tabela_previsoes):
+    ultimo = (
+        spark.read.table(tabela_previsoes)
+        .filter(col("tipo") == "previsao")
+        .agg({"mes_base": "max"})
+        .first()[0]
+    )
+    if ultimo is not None and pd.Timestamp(ultimo) == mes_base_atual:
+        dbutils.notebook.exit(f"Sem IPCA novo desde o último treino (mês base {mes_base_atual:%m/%Y}); nada a fazer")
 
 # COMMAND ----------
 
@@ -273,7 +362,10 @@ linhas_teste = []
 for ano in anos_teste:
     fim_treino = pd.Timestamp(year=ano - 1, month=12, day=1)
     origens = list(features.loc[features["mes_base"].dt.year == ano, "mes_base"])
-    arima = previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, fim_treino, origens)
+    temporais = {"arima": previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, fim_treino, origens)}
+    for modelo, colunas in EXOGENAS_SARIMAX.items():
+        temporais[modelo] = previsoes_arima(serie_sarimax, ordem_arima, sazonal_arima, fim_treino, origens,
+                                            exog=exogenas[colunas])
 
     for alvo, dados in preparados.items():
         treino, teste = separar_por_ano(dados, alvo, ano)
@@ -282,8 +374,9 @@ for ano in anos_teste:
         ridge = novo_ridge().fit(treino[FEATURES_LINEAR], treino["y"])
         rf = RandomForestRegressor(**PARAMS_RF).fit(treino[FEATURES_RF], treino["y"])
         previstos = {modelo: np.asarray(previsao_referencia(teste, alvo, modelo), dtype=float)
-                     for modelo in MODELOS if modelo not in ("arima", "ridge", "random_forest")}
-        previstos["arima"] = np.array([previsao_arima_alvo(arima, o, alvo) for o in teste["mes_base"]])
+                     for modelo in MODELOS if modelo not in (*SERIES_TEMPORAIS, "ridge", "random_forest")}
+        for modelo, previsoes in temporais.items():
+            previstos[modelo] = np.array([previsao_arima_alvo(previsoes, o, alvo) for o in teste["mes_base"]])
         previstos["ridge"] = ridge.predict(teste[FEATURES_LINEAR])
         previstos["random_forest"] = rf.predict(teste[FEATURES_RF])
 
@@ -331,6 +424,7 @@ mlflow.log_params({
     "mes_base_previsao": f"{mes_base_atual:%Y-%m}",
     "arima_order": str(ordem_arima),
     "arima_seasonal_order": str(sazonal_arima),
+    **{f"exogenas_{m}": ",".join(c) for m, c in EXOGENAS_SARIMAX.items()},
     "features_linear": ",".join(FEATURES_LINEAR),
     "features_rf": ",".join(FEATURES_RF),
     "alphas_ridge": f"{ALPHAS_RIDGE[0]:g} a {ALPHAS_RIDGE[-1]:g} ({len(ALPHAS_RIDGE)} valores)",
@@ -347,7 +441,16 @@ mlflow.log_text(tabela_metricas.to_csv(index=False), "metricas.csv")
 # COMMAND ----------
 
 # DBTITLE 1,Final Models and Current Forecast
-arima_final = previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, mes_base_atual, [mes_base_atual])
+temporais_final = {"arima": previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, mes_base_atual, [mes_base_atual])}
+parametros = []
+for modelo, colunas in EXOGENAS_SARIMAX.items():
+    temporais_final[modelo] = previsoes_arima(serie_sarimax, ordem_arima, sazonal_arima, mes_base_atual,
+                                              [mes_base_atual], exog=exogenas[colunas])
+    endog, defasadas = alinhar_exogenas(serie_sarimax, exogenas[colunas])
+    ajuste = ajustar_arima(endog, ordem_arima, sazonal_arima, defasadas)
+    parametros.append(parametros_sarimax(ajuste).assign(modelo=modelo, n_meses=len(endog)))
+tabela_parametros = pd.concat(parametros, ignore_index=True)
+display(tabela_parametros.round(4))
 linhas_coeficientes, linhas_previsao, importancias = [], [], []
 
 for alvo, dados in preparados.items():
@@ -382,8 +485,8 @@ for alvo, dados in preparados.items():
         "periodo": None,
         "valor_real": None,
         **{f"previsao_{m}": float(np.asarray(previsao_referencia(atual, alvo, m))[0])
-           for m in MODELOS if m not in ("arima", "ridge", "random_forest")},
-        "previsao_arima": previsao_arima_alvo(arima_final, mes_base_atual, alvo),
+           for m in MODELOS if m not in (*SERIES_TEMPORAIS, "ridge", "random_forest")},
+        **{f"previsao_{m}": previsao_arima_alvo(p, mes_base_atual, alvo) for m, p in temporais_final.items()},
         "previsao_ridge": previsao_ridge,
         "previsao_random_forest": float(rf_final.predict(atual[FEATURES_RF])[0]),
         "limite_inferior": previsao_ridge + inferior,
@@ -394,13 +497,14 @@ for alvo, dados in preparados.items():
 
 mlflow.log_text(pd.DataFrame(linhas_coeficientes).to_csv(index=False), "coeficientes_ridge.csv")
 mlflow.log_text(pd.DataFrame(importancias).to_csv(index=False), "importancia_random_forest.csv")
+mlflow.log_text(tabela_parametros.to_csv(index=False), "parametros_sarimax.csv")
 run_id = run.info.run_id
 mlflow.end_run()
 print(f"MLflow run: {run_id}")
 
 previsao_atual = pd.DataFrame(linhas_previsao)
-display(previsao_atual[["alvo", "mes_previsto", "previsao_ridge", "limite_inferior", "limite_superior",
-                        "previsao_arima", "previsao_sazonal", "previsao_random_forest"]].round(3))
+display(previsao_atual[["alvo", "mes_previsto", "previsao_arima", "previsao_sarimax", "previsao_sarimax_ampliado",
+                        "previsao_ridge", "limite_inferior", "limite_superior", "previsao_sazonal"]].round(3))
 
 # COMMAND ----------
 
@@ -437,6 +541,13 @@ gravar(
     "coeficientes_modelo",
     "Coeficientes do Ridge por alvo (h1 a h12 e acum_12m), em unidades originais: "
     "previsao = intercepto + soma(coeficiente * feature). erro_p10/erro_p90 formam a faixa de 80%",
+)
+gravar(
+    tabela_parametros[["modelo", "parametro", "coeficiente", "erro_padrao", "p_valor", "ic95_inferior", "ic95_superior",
+                       "n_meses"]],
+    "parametros_sarimax",
+    "Parâmetros dos SARIMAX ajustados com todo o histórico: coeficientes das variáveis externas (mês anterior) "
+    "e dos termos ARIMA, com erro padrão, p-valor e intervalo de 95%",
 )
 gravar(
     tabela_metricas,

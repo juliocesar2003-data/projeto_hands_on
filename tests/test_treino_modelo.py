@@ -27,7 +27,7 @@ def f():
     return carregar_funcoes(
         NOTEBOOK,
         "meses_a_frente", "compor", "preparar", "separar_por_ano", "medias_moveis", "previsao_referencia",
-        "periodo_de", "ajustar_arima", "previsoes_arima", "previsao_arima_alvo", "coeficientes_originais",
+        "periodo_de", "ajustar_arima", "alinhar_exogenas", "previsoes_arima", "previsao_arima_alvo", "coeficientes_originais",
         "faixa_erro", "metricas",
         np=np, pd=pd, warnings=warnings, SARIMAX=SARIMAX, Ridge=Ridge, RidgeCV=RidgeCV,
         TimeSeriesSplit=TimeSeriesSplit, HORIZONTES=HORIZONTES, ALVOS=ALVOS, PERIODOS=PERIODOS,
@@ -174,3 +174,78 @@ def test_primeiro_teste_tem_historico_de_features():
     gold_inicio = carregar_constante(TRANSFORMATIONS / "gold" / "gold_features.py", "INICIO_FEATURES")
     # Pelo menos 3 anos de features antes do primeiro ano de teste
     assert int(gold_inicio[:4]) + 3 <= carregar_constante(NOTEBOOK, "PRIMEIRO_ANO_TESTE")
+
+
+@pytest.fixture
+def fx():
+    return carregar_funcoes(
+        NOTEBOOK, "exogenas_mensais", "alinhar_exogenas", "ajustar_arima", "previsoes_arima", "parametros_sarimax",
+        np=np, pd=pd, warnings=warnings, SARIMAX=SARIMAX,
+    )
+
+
+def test_exogenas_seguem_as_definicoes_da_features_mensal(fx):
+    meses = pd.date_range("2020-01-01", periods=13, freq="MS")
+    ipca = pd.Series(0.5, index=meses)
+    selic = pd.Series(np.linspace(10, 12.4, 13), index=meses)
+    usd = pd.Series(np.linspace(5, 6.2, 13), index=meses)
+    exog = fx["exogenas_mensais"](ipca, selic, usd).iloc[-1]
+
+    assert exog["juro_real_12m"] == pytest.approx(12.4 - (1.005**12 - 1) * 100)
+    assert exog["selic_var_12m_pp"] == pytest.approx(2.4)
+    assert exog["usd_var_12m"] == pytest.approx((6.2 / 5 - 1) * 100)
+    assert exog["usd_var_3m"] == pytest.approx((6.2 / 5.9 - 1) * 100)
+
+
+def _serie_com_exogena():
+    rng = np.random.default_rng(2)
+    meses = pd.date_range("2008-01-01", periods=120, freq="MS")
+    x = pd.Series(rng.normal(5, 2, len(meses)), index=meses)
+    y = 0.4 + 0.03 * x.shift(1).fillna(5) + rng.normal(0, 0.05, len(meses))
+    return pd.Series(y, index=meses).asfreq("MS"), pd.DataFrame({"x": x})
+
+
+def test_sarimax_nao_usa_dados_depois_da_origem(fx):
+    serie, exog = _serie_com_exogena()
+    origem = pd.Timestamp("2015-06-01")
+    args = ((1, 0, 0), (0, 0, 0, 12), pd.Timestamp("2014-12-01"), [origem])
+
+    completa = fx["previsoes_arima"](serie, *args, exog=exog)[origem]
+    cortada = fx["previsoes_arima"](serie[serie.index <= origem], *args, exog=exog[exog.index <= origem])[origem]
+    np.testing.assert_allclose(completa, cortada)
+
+
+def test_cenario_desloca_toda_a_previsao_pelo_coeficiente(fx):
+    # Regressão com erros SARIMA: mudar a variável externa em delta (mantida nos 12 meses) muda cada mês
+    # previsto em coeficiente x delta. É a conta que o simulador vai fazer em SQL.
+    serie, exog = _serie_com_exogena()
+    origem, fim = pd.Timestamp("2015-06-01"), pd.Timestamp("2014-12-01")
+    cenario = exog.copy()
+    cenario.loc[origem, "x"] += 2.0
+
+    base = fx["previsoes_arima"](serie, (1, 0, 0), (0, 0, 0, 12), fim, [origem], exog=exog)[origem]
+    alterada = fx["previsoes_arima"](serie, (1, 0, 0), (0, 0, 0, 12), fim, [origem], exog=cenario)[origem]
+    defasadas = exog.shift(1).loc[serie.index[1:]]
+    coef = fx["ajustar_arima"](serie[1:][serie.index[1:] <= fim], (1, 0, 0), (0, 0, 0, 12),
+                               defasadas[defasadas.index <= fim]).params["x"]
+    # O primeiro mês previsto usa a variável do mês de origem; os demais, o valor mantido
+    np.testing.assert_allclose(alterada - base, np.full(12, 2.0 * coef), rtol=1e-6)
+
+
+def test_parametros_sarimax_tem_intervalo(fx):
+    serie, exog = _serie_com_exogena()
+    ajuste = fx["ajustar_arima"](serie[1:], (1, 0, 0), (0, 0, 0, 12), exog.shift(1).iloc[1:])
+    tabela = fx["parametros_sarimax"](ajuste)
+    linha = tabela.set_index("parametro").loc["x"]
+    assert linha["ic95_inferior"] < linha["coeficiente"] < linha["ic95_superior"]
+    assert linha["coeficiente"] == pytest.approx(0.03, abs=0.01)
+
+
+def test_alinhar_descarta_meses_sem_todas_as_exogenas(fx):
+    meses = pd.date_range("2000-01-01", periods=6, freq="MS")
+    serie = pd.Series(np.arange(6.0), index=meses)
+    exog = pd.DataFrame({"a": [1.0, 2, 3, 4, 5, 6], "b": [np.nan, np.nan, 1, 1, 1, 1]}, index=meses)
+    endog, defasadas = fx["alinhar_exogenas"](serie, exog)
+    # O IPCA de t usa a exógena de t-1: o primeiro mês com "b" defasado é março
+    assert list(endog.index) == list(meses[3:])
+    assert defasadas.notna().all().all() and defasadas["a"].iloc[0] == 3.0
