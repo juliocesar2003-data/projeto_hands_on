@@ -35,6 +35,12 @@ Spark Declarative Pipeline (serverless)
       └─ Gold: materialized views
            gold.metas_inflacao — metas de inflação do CMN por ano
            gold.features_mensal — base do modelo de previsão do IPCA (features + alvos h1 a h12)
+                 │
+                 ▼
+Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento previsao_ipca)
+   gold.coeficientes_modelo — coeficientes do Ridge por horizonte (usados pelo simulador)
+   gold.metricas_modelo — erro no teste por horizonte e modelo
+   gold.previsoes_ipca — previsão dos próximos 12 meses com faixa de 80% + backtest
 ```
 
 ## Estrutura do repositório
@@ -52,6 +58,7 @@ databricks/
 │   ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)
 │   ├── ingestao_diaria_bacen.py     # Ingestão diária incremental (somente registros novos)
 │   ├── eda_bacen.py                 # Análise exploratória sobre as tabelas silver
+│   ├── treino_modelo_ipca.py        # Treino e previsão do IPCA (MLflow → tabelas gold do modelo)
 │   └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
 └── transformations/
     ├── bronze/
@@ -217,6 +224,53 @@ Nomenclatura: `lagN` = N meses antes do mês previsto em `h1` (`lag1` é o próp
 
 Tabela de referência com a meta do CMN por ano (`ano`, `meta`, `tolerancia_pp`, `limite_inferior`, `limite_superior`, `norma`), mantida no código (`METAS_INFLACAO`) a partir do [histórico do Banco Central](https://www.bcb.gov.br/controleinflacao/historicometas). De 2006 a 2018 a meta foi 4,50%, caindo até 3,00% em 2024. Desde 2025 vale a meta contínua de 3,00% ± 1,5 p.p. (Resolução CMN nº 5.141), medida no IPCA acumulado em 12 meses. **Quando o CMN definir a meta de um novo ano, é preciso incluí-la em `METAS_INFLACAO`**; a regra de qualidade `meta_cadastrada` sinaliza meses sem meta.
 
+## Modelo de previsão do IPCA
+
+O notebook `databricks/notebooks/treino_modelo_ipca.py` treina **um modelo por horizonte** (estratégia direta): o IPCA de cada um dos próximos 12 meses (`h1` a `h12`) e o IPCA acumulado em 12 meses (`acum_12m`), a partir de `gold.features_mensal`. Ele roda como última tarefa do Job diário, então as previsões acompanham cada novo IPCA divulgado.
+
+### Modelos comparados
+
+| Modelo | Papel |
+|---|---|
+| `ultimo_mes` | Referência ingênua: repete o IPCA do mês base (ou o acumulado em 12 meses) |
+| `sazonal` | Referência: média histórica do mês do calendário previsto |
+| `ridge` | Regressão linear com regularização (alpha escolhido por validação temporal). **Modelo oficial**: os coeficientes alimentam o simulador |
+| `random_forest` | Comparação não linear, com todas as features (inclusive as comparações em z-score) |
+
+O Ridge usa poucas features, todas calculáveis a partir dos parâmetros do simulador: `ipca_lag1`, `ipca_acum_3m`, `ipca_12m_menos_meta`, `ipca_sazonal` (média histórica do mês previsto), `juro_real_12m`, `selic_var_12m_pp`, `usd_var_3m` e `usd_var_12m`. As comparações em z-score ficam só no Random Forest, porque são combinações das mesmas variações e deixariam os coeficientes lineares instáveis.
+
+### Validação
+
+- **Treino:** meses base de 01/2006 a 12/2019 cujo alvo também é até 12/2019. Meses base de 2019 com alvo em 2020 ficam fora, para não vazar o período de teste.
+- **Teste:** meses base de 01/2020 em diante, com alvo conhecido (inclui a pandemia e a alta de 2021–2022).
+- **Métricas:** MAE e RMSE em pontos percentuais, registradas no MLflow (experimento `/Users/<usuário>/previsao_ipca`) junto com parâmetros, coeficientes e importância das features do Random Forest.
+
+Resultado da primeira execução (MAE no teste, em p.p.; menor é melhor):
+
+| Alvo | Último mês | Sazonal | Ridge | Random Forest |
+|---|---|---|---|---|
+| h1 | 0,315 | 0,316 | **0,269** | 0,289 |
+| h3 | 0,437 | 0,313 | **0,296** | 0,344 |
+| h6 | 0,454 | 0,303 | **0,293** | 0,305 |
+| h12 | 0,392 | 0,303 | **0,284** | 0,329 |
+| acum_12m | 2,743 | 2,106 | **1,938** | 2,876 |
+
+O Ridge tem o menor erro em todos os horizontes. Nos horizontes mais longos a vantagem sobre a média sazonal diminui: a inflação de vários meses à frente depende de choques que os dados do mês base não antecipam.
+
+### Previsão atual e faixa de incerteza
+
+Depois da avaliação, o Ridge (com o mesmo alpha) e o Random Forest são reajustados com todos os meses que têm alvo e aplicados ao mês base mais recente. A faixa de 80% soma à previsão os quantis de 10% e 90% dos erros do Ridge no teste, então fica mais larga onde o modelo errou mais.
+
+### Tabelas gravadas
+
+| Tabela | Conteúdo |
+|---|---|
+| `gold.coeficientes_modelo` | Por alvo: `intercepto` e um coeficiente por feature, em unidades originais (`previsao = intercepto + soma(coeficiente × feature)`), mais `alpha`, `erro_p10` e `erro_p90` |
+| `gold.metricas_modelo` | MAE, RMSE e quantidade de meses de teste e treino, por alvo e modelo |
+| `gold.previsoes_ipca` | `tipo = previsao`: os 13 alvos a partir do último mês base, com `limite_inferior` e `limite_superior`. `tipo = teste`: previsto × realizado de cada modelo no período de teste |
+
+As três tabelas são recriadas a cada treino e trazem `run_id` (execução do MLflow) e `treinado_em`.
+
 ## Jobs
 
 Os Jobs e o pipeline são definidos como código em `databricks.yml` e criados/atualizados automaticamente pelo CD. Não é necessário configurá-los pela interface do Databricks.
@@ -233,6 +287,7 @@ Job para rodar sem acompanhamento, com a seguinte configuração:
 |---|---|
 | Tarefa 1 — `ingestao_diaria` | Notebook `databricks/notebooks/ingestao_diaria_bacen.py`, compute serverless |
 | Tarefa 2 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente da tarefa 1 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
+| Tarefa 3 — `treino_modelo` | Notebook `databricks/notebooks/treino_modelo_ipca.py`, compute serverless, depois da atualização do pipeline: retreina o modelo e atualiza as previsões |
 | Agendamento | Diário às 21:00, fuso `America/Sao_Paulo` (após a publicação da PTAX e dos indicadores do dia) |
 | Retentativas | 2 retentativas na tarefa 1, com intervalo de 10 minutos |
 | Notificações | E-mail em caso de falha (para o usuário dono do token usado no deploy) |

@@ -35,6 +35,12 @@ Spark Declarative Pipeline (serverless)
       └─ Gold: materialized views
            gold.metas_inflacao — metas de inflação do CMN por ano
            gold.features_mensal — base do modelo de previsão do IPCA (features + alvos h1 a h12)
+                 │
+                 ▼
+Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento previsao_ipca)
+   gold.coeficientes_modelo — coeficientes do Ridge por horizonte (usados pelo simulador)
+   gold.metricas_modelo — erro no teste por horizonte e modelo
+   gold.previsoes_ipca — previsão dos próximos 12 meses com faixa de 80% + backtest
 ```
 
 ## Conteúdo
@@ -44,6 +50,7 @@ notebooks/
 ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)
 ├── ingestao_diaria_bacen.py     # Ingestão diária incremental (somente registros novos)
 ├── eda_bacen.py                 # Análise exploratória sobre as tabelas silver (ver README principal)
+├── treino_modelo_ipca.py        # Treino e previsão do IPCA (ver README principal)
 └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
 transformations/
 ├── bronze/
@@ -80,6 +87,7 @@ Job para rodar sem acompanhamento, com a seguinte configuração:
 |---|---|
 | Tarefa 1 — `ingestao_diaria` | Notebook `notebooks/ingestao_diaria_bacen.py`, compute serverless |
 | Tarefa 2 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente da tarefa 1 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
+| Tarefa 3 — `treino_modelo` | Notebook `notebooks/treino_modelo_ipca.py`, compute serverless, depois da atualização do pipeline: retreina o modelo e atualiza as previsões |
 | Agendamento | Diário às 21:00, fuso `America/Sao_Paulo` (após a publicação da PTAX e dos indicadores do dia) |
 | Retentativas | 2 retentativas na tarefa 1, com intervalo de 10 minutos |
 | Notificações | E-mail em caso de falha (para o usuário dono do token usado no deploy) |
