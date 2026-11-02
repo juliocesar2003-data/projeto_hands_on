@@ -1,11 +1,15 @@
 """Tests for the pure functions of the IPCA training notebook (no Spark or MLflow needed)."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, RidgeCV
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from conftest import NOTEBOOKS, TRANSFORMATIONS, carregar_constante, carregar_funcoes
 
@@ -15,26 +19,29 @@ ALVOS = {**{f"h{h}": f"alvo_ipca_h{h}" for h in HORIZONTES}, "acum_12m": "alvo_i
 
 FEATURES_LINEAR = carregar_constante(NOTEBOOK, "FEATURES_LINEAR")
 FEATURES_RF_EXTRAS = carregar_constante(NOTEBOOK, "FEATURES_RF_EXTRAS")
+PERIODOS = carregar_constante(NOTEBOOK, "PERIODOS")
 
 
 @pytest.fixture
 def f():
     return carregar_funcoes(
         NOTEBOOK,
-        "meses_a_frente", "preparar", "separar_treino_teste", "previsao_referencia",
-        "coeficientes_originais", "faixa_erro", "metricas",
-        np=np, pd=pd, HORIZONTES=HORIZONTES, ALVOS=ALVOS,
+        "meses_a_frente", "compor", "preparar", "separar_por_ano", "medias_moveis", "previsao_referencia",
+        "periodo_de", "ajustar_arima", "previsoes_arima", "previsao_arima_alvo", "coeficientes_originais",
+        "faixa_erro", "metricas",
+        np=np, pd=pd, warnings=warnings, SARIMAX=SARIMAX, Ridge=Ridge, RidgeCV=RidgeCV,
+        TimeSeriesSplit=TimeSeriesSplit, HORIZONTES=HORIZONTES, ALVOS=ALVOS, PERIODOS=PERIODOS,
     )
 
 
-def _features(meses=60):
+def _features(meses=72):
     """Small features_mensal-like frame: monthly base months from 2015, constant seasonal means."""
     base = pd.DataFrame({"mes_base": pd.date_range("2015-01-01", periods=meses, freq="MS")})
     for h in HORIZONTES:
         base[f"ipca_sazonal_h{h}"] = 0.5
         base[f"alvo_ipca_h{h}"] = 0.4
     base["alvo_ipca_acum_12m"] = 5.0
-    base["ipca_lag1"], base["ipca_acum_12m"] = 0.3, 4.0
+    base["ipca_lag1"], base["ipca_acum_12m"], base["media_movel_3m"] = 0.3, 4.0, 0.25
     return base
 
 
@@ -44,6 +51,11 @@ def test_meses_a_frente(f):
     assert f["meses_a_frente"]("acum_12m") == 12
 
 
+def test_compor_acumula_em_juros_compostos(f):
+    assert f["compor"]([1.0, 1.0]) == pytest.approx(2.01)
+    assert f["compor"]([0.5] * 12) == pytest.approx((1.005**12 - 1) * 100)
+
+
 def test_sazonal_acumulada_compoe_os_12_meses(f):
     dados = f["preparar"](_features(), "acum_12m")
     assert dados["ipca_sazonal"].iloc[0] == pytest.approx((1.005**12 - 1) * 100)
@@ -51,30 +63,73 @@ def test_sazonal_acumulada_compoe_os_12_meses(f):
 
 
 @pytest.mark.parametrize("alvo", ["h1", "h6", "acum_12m"])
-def test_treino_nao_tem_alvo_no_periodo_de_teste(f, alvo):
+def test_origem_movel_nao_treina_com_alvo_do_ano_de_teste(f, alvo):
     dados = f["preparar"](_features(), alvo)
-    treino, teste = f["separar_treino_teste"](dados, alvo, "2017-12-01")
+    treino, teste = f["separar_por_ano"](dados, alvo, 2018)
     meses = f["meses_a_frente"](alvo)
 
-    assert (treino["mes_base"] + pd.DateOffset(months=meses) <= "2017-12-01").all()
-    assert (teste["mes_base"] > "2017-12-01").all()
-    # Meses base cujo alvo cai no teste ficam fora dos dois conjuntos
-    assert len(dados) - len(treino) - len(teste) == meses
+    assert (treino["mes_base"] + pd.DateOffset(months=meses) < "2018-01-01").all()
+    assert (teste["mes_base"].dt.year == 2018).all() and len(teste) == 12
+    # O treino usa tudo o que já era conhecido: meses base até 12/2017 menos o horizonte
+    assert len(treino) == 36 - meses + 1 - 1
 
 
-def test_sem_alvo_fica_fora_do_treino_e_do_teste(f):
+def test_ano_sem_alvo_conhecido_fica_sem_teste(f):
     dados = _features()
-    dados.loc[dados.index[-3:], "alvo_ipca_h1"] = None
-    treino, teste = f["separar_treino_teste"](f["preparar"](dados, "h1"), "h1", "2017-12-01")
-    assert treino["y"].notna().all() and teste["y"].notna().all()
-    assert len(teste) == 24 - 3  # 2018 e 2019, menos os 3 últimos meses sem alvo
+    dados.loc[dados["mes_base"].dt.year == 2020, "alvo_ipca_h1"] = None
+    _, teste = f["separar_por_ano"](f["preparar"](dados, "h1"), "h1", 2020)
+    assert teste.empty
+
+
+def test_media_movel_usa_so_meses_ate_a_origem(f):
+    ipca = pd.Series([1.0, 2.0, 3.0, 4.0], index=pd.date_range("2020-01-01", periods=4, freq="MS"))
+    medias = f["medias_moveis"](ipca, [3])
+    assert np.isnan(medias["media_movel_3m"].iloc[1])
+    assert medias["media_movel_3m"].iloc[2] == pytest.approx(2.0)
+    assert medias["media_movel_3m"].iloc[3] == pytest.approx(3.0)
 
 
 def test_referencias(f):
     dados = f["preparar"](_features(), "h3")
     assert (f["previsao_referencia"](dados, "h3", "ultimo_mes") == 0.3).all()
     assert (f["previsao_referencia"](dados, "h3", "sazonal") == 0.5).all()
-    assert (f["previsao_referencia"](f["preparar"](_features(), "acum_12m"), "acum_12m", "ultimo_mes") == 4.0).all()
+    assert (f["previsao_referencia"](dados, "h3", "media_movel_3m") == 0.25).all()
+
+    acum = f["preparar"](_features(), "acum_12m")
+    assert (f["previsao_referencia"](acum, "acum_12m", "ultimo_mes") == 4.0).all()
+    assert f["previsao_referencia"](acum, "acum_12m", "media_movel_3m").iloc[0] == pytest.approx((1.0025**12 - 1) * 100)
+
+
+def test_periodos(f):
+    assert f["periodo_de"](pd.Timestamp("2005-01-01")) == "2005-2016"
+    assert f["periodo_de"](pd.Timestamp("2018-06-01")) == "2017-2019"
+    assert f["periodo_de"](pd.Timestamp("2021-12-01")) == "2020-2021"
+    assert f["periodo_de"](pd.Timestamp("2027-03-01")) == "2022 em diante"
+
+
+def _serie_sazonal():
+    rng = np.random.default_rng(1)
+    meses = pd.date_range("2010-01-01", periods=96, freq="MS")
+    valores = 0.4 + 0.2 * np.sin(2 * np.pi * meses.month / 12) + rng.normal(0, 0.05, len(meses))
+    return pd.Series(valores, index=meses).asfreq("MS")
+
+
+def test_arima_nao_usa_dados_depois_da_origem(f):
+    serie = _serie_sazonal()
+    origem, fim_treino = pd.Timestamp("2015-06-01"), pd.Timestamp("2014-12-01")
+    args = ((1, 0, 0), (1, 0, 0, 12), fim_treino, [origem])
+
+    completa = f["previsoes_arima"](serie, *args)[origem]
+    cortada = f["previsoes_arima"](serie[serie.index <= origem], *args)[origem]
+    assert len(completa) == 12
+    np.testing.assert_allclose(completa, cortada)
+
+
+def test_arima_por_alvo(f):
+    previsoes = {pd.Timestamp("2020-01-01"): np.full(12, 0.5)}
+    origem = pd.Timestamp("2020-01-01")
+    assert f["previsao_arima_alvo"](previsoes, origem, "h3") == 0.5
+    assert f["previsao_arima_alvo"](previsoes, origem, "acum_12m") == pytest.approx((1.005**12 - 1) * 100)
 
 
 def test_coeficientes_originais_reproduzem_a_previsao_do_modelo(f):
@@ -99,6 +154,13 @@ def test_faixa_e_metricas(f):
     assert m["n_teste"] == 4
 
 
+def test_periodos_cobrem_os_testes_sem_sobreposicao():
+    intervalos = sorted(PERIODOS.values())
+    assert intervalos[0][0] == f"{carregar_constante(NOTEBOOK, 'PRIMEIRO_ANO_TESTE')}-01-01"
+    for (_, fim), (inicio, _) in zip(intervalos, intervalos[1:]):
+        assert pd.Timestamp(fim) + pd.DateOffset(months=1) == pd.Timestamp(inicio)
+
+
 def test_features_do_modelo_existem_na_tabela_gold():
     gold = (TRANSFORMATIONS / "gold" / "gold_features.py").read_text(encoding="utf-8")
     assert not set(FEATURES_LINEAR) & set(FEATURES_RF_EXTRAS)
@@ -106,3 +168,9 @@ def test_features_do_modelo_existem_na_tabela_gold():
     for feature in FEATURES_LINEAR + FEATURES_RF_EXTRAS:
         if feature != "ipca_sazonal":
             assert f'"{feature}"' in gold, f"{feature} não é coluna de gold.features_mensal"
+
+
+def test_primeiro_teste_tem_historico_de_features():
+    gold_inicio = carregar_constante(TRANSFORMATIONS / "gold" / "gold_features.py", "INICIO_FEATURES")
+    # Pelo menos 3 anos de features antes do primeiro ano de teste
+    assert int(gold_inicio[:4]) + 3 <= carregar_constante(NOTEBOOK, "PRIMEIRO_ANO_TESTE")

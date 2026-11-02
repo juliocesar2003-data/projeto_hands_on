@@ -5,3 +5,4 @@ pyyaml==6.0.3
 requests==2.34.2
 ruff==0.17.2
 scikit-learn==1.9.1
+statsmodels==0.15.0

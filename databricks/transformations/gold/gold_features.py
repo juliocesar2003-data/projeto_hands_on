@@ -27,6 +27,12 @@ from pyspark.sql.functions import (
 # Fonte: https://www.bcb.gov.br/controleinflacao/historicometas (conferido em 31/10/2026).
 # Ano -> (meta %, tamanho do intervalo de tolerância +/- p.p., norma)
 METAS_INFLACAO = {
+    2000: (6.00, 2.00, "Resolução CMN nº 2.615"),
+    2001: (4.00, 2.00, "Resolução CMN nº 2.615"),
+    2002: (3.50, 2.00, "Resolução CMN nº 2.744"),
+    # 2003 e 2004 tiveram a meta revista; vale a última definida (antes: 3,25% e 3,75%)
+    2003: (4.00, 2.50, "Resolução CMN nº 2.972"),
+    2004: (5.50, 2.50, "Resolução CMN nº 3.108"),
     2005: (4.50, 2.50, "Resolução CMN nº 3.108"),
     2006: (4.50, 2.00, "Resolução CMN nº 3.210"),
     2007: (4.50, 2.00, "Resolução CMN nº 3.291"),
@@ -52,16 +58,14 @@ METAS_INFLACAO = {
     2027: (3.00, 1.50, "Resolução CMN nº 5.141 (meta contínua)"),
 }
 
-# Primeiro mês base da tabela (20 anos de histórico); os lags usam os meses anteriores
-INICIO_FEATURES = "2006-01-01"
-# Período de treino do modelo: média e desvio padrão dos z-scores vêm só dele, para não vazar o futuro
-INICIO_TREINO = "2006-01-01"
-FIM_TREINO = "2019-12-01"
-# Médias sazonais a partir do regime de metas (1999), sem o período de inflação alta dos anos 1990
-INICIO_SAZONAL = "2000-01-01"
+# Primeiro mês base da tabela: a Selic meta começa em 03/1999, e a variação da Selic em 12 meses precisa de um ano dela
+INICIO_FEATURES = "2001-01-01"
+# Início do histórico usado nas médias sazonais e nos z-scores: depois da estabilização do Plano Real
+# (o IPCA ainda passava de 1% ao mês em 1996)
+INICIO_HISTORICO = "1997-01-01"
 HORIZONTES = range(1, 13)
 
-# Variações comparadas em z-score (desvios padrão em relação à média do treino)
+# Variações comparadas em z-score: desvios padrão em relação à média do histórico conhecido até o mês base
 COLUNAS_Z = ["usd_var_12m", "selic_var_12m_pp", "ipca_acum_12m"]
 COMPARACOES_Z = {
     "usd_vs_selic_z": ("usd_var_12m_z", "selic_var_12m_pp_z"),
@@ -131,7 +135,7 @@ def features_mensal():
     ultimos_3 = w.rowsBetween(-2, 0)
     ultimos_12 = w.rowsBetween(-11, 0)
     proximos_12 = w.rowsBetween(1, 12)
-    # Média do IPCA do mesmo mês do calendário até cada mês (inclusive), desde INICIO_SAZONAL
+    # Média do IPCA do mesmo mês do calendário até cada mês (inclusive), desde INICIO_HISTORICO
     mesmo_mes = Window.partitionBy(month("mes_base")).orderBy("mes_base").rowsBetween(Window.unboundedPreceding, 0)
 
     def acumulado(janela, meses):
@@ -159,7 +163,7 @@ def features_mensal():
         .join(_usd_mensal(), "mes_base", "left")
         .join(metas, year("mes_base") == col("ano"), "left")
         .drop("ano")
-        .withColumn("media_mesmo_mes", avg(when(col("mes_base") >= INICIO_SAZONAL, col("ipca"))).over(mesmo_mes))
+        .withColumn("media_mesmo_mes", avg(when(col("mes_base") >= INICIO_HISTORICO, col("ipca"))).over(mesmo_mes))
         .withColumn("mudou_selic", col("selic") != lag("selic").over(w))
         .withColumn(
             "ultima_mudanca_selic",
@@ -193,7 +197,7 @@ def features_mensal():
         "usd_volatilidade_lag1",
         *[lead("ipca", h).over(w).alias(f"alvo_ipca_h{h}") for h in HORIZONTES],
         acumulado(proximos_12, 12).alias("alvo_ipca_acum_12m"),
-    ).filter(col("mes_base") >= INICIO_FEATURES)
+    )
 
     features = (
         features.withColumn("ipca_12m_menos_meta", col("ipca_acum_12m") - col("meta_inflacao"))
@@ -201,16 +205,17 @@ def features_mensal():
         .withColumn("usd_menos_ipca_12m", col("usd_var_12m") - col("ipca_acum_12m"))
     )
 
-    # z-score = (valor - média do treino) / desvio padrão do treino
-    estatisticas = (
-        features.filter(col("mes_base").between(INICIO_TREINO, FIM_TREINO))
-        .agg(*[f(c).alias(f"{c}_{nome}") for c in COLUNAS_Z for nome, f in (("media", avg), ("desvio", stddev))])
-    )
-    features = features.crossJoin(estatisticas)
+    # z-score = (valor - média) / desvio padrão, com média e desvio de INICIO_HISTORICO até o próprio mês base:
+    # cada linha só usa o que já era conhecido, então não há vazamento em nenhum período de teste
+    historico = w.rowsBetween(Window.unboundedPreceding, 0)
     for c in COLUNAS_Z:
-        features = features.withColumn(f"{c}_z", (col(c) - col(f"{c}_media")) / col(f"{c}_desvio"))
+        valor_historico = when(col("mes_base") >= INICIO_HISTORICO, col(c))
+        features = features.withColumn(
+            f"{c}_z", (col(c) - avg(valor_historico).over(historico)) / stddev(valor_historico).over(historico)
+        )
     for nome, (a, b) in COMPARACOES_Z.items():
         features = features.withColumn(nome, col(a) - col(b))
+    features = features.filter(col("mes_base") >= INICIO_FEATURES)
 
     alvos_disponiveis = sum(col(f"alvo_ipca_h{h}").isNotNull().cast("int") for h in HORIZONTES)
     features_completas = col(FEATURES[0]).isNotNull()
@@ -225,9 +230,7 @@ def features_mensal():
         *colunas,
         alvos_disponiveis.alias("alvos_disponiveis"),
         features_completas.alias("features_completas"),
-        when(col("mes_base") <= FIM_TREINO, "treino")
-        .when(alvos_disponiveis > 0, "teste")
-        .otherwise("previsao")
-        .alias("conjunto"),
+        # historico: tem pelo menos um alvo conhecido (usado no treino e nos testes); previsao: o mês base mais recente
+        when(alvos_disponiveis > 0, "historico").otherwise("previsao").alias("conjunto"),
         current_date().alias("data_calculo"),
     )

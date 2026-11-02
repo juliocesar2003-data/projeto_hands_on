@@ -38,9 +38,9 @@ Spark Declarative Pipeline (serverless)
                  │
                  ▼
 Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento previsao_ipca)
-   gold.coeficientes_modelo — coeficientes do Ridge por horizonte (usados pelo simulador)
-   gold.metricas_modelo — erro no teste por horizonte e modelo
-   gold.previsoes_ipca — previsão dos próximos 12 meses com faixa de 80% + backtest
+   gold.coeficientes_modelo — coeficientes do Ridge por horizonte (base do simulador)
+   gold.metricas_modelo — erro por horizonte, modelo e período (validação ano a ano)
+   gold.previsoes_ipca — previsão dos próximos 12 meses de cada modelo + previsto × realizado
 ```
 
 ## Conteúdo

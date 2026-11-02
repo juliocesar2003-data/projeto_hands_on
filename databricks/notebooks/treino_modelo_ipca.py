@@ -5,23 +5,26 @@
 # MAGIC
 # MAGIC Treina um modelo por horizonte (estratégia direta) para prever o IPCA de cada um dos próximos 12 meses (`h1` a `h12`) e o IPCA acumulado em 12 meses (`acum_12m`), a partir da tabela `projeto_hands_on.gold.features_mensal`.
 # MAGIC
-# MAGIC | Modelo | Papel |
-# MAGIC |---|---|
-# MAGIC | `ultimo_mes` | Referência ingênua: repete o IPCA do mês base (ou o acumulado em 12 meses) |
-# MAGIC | `sazonal` | Referência: média histórica do mês do calendário previsto |
-# MAGIC | `ridge` | Regressão linear com regularização. **Modelo oficial**: os coeficientes vão para o simulador (`gold.coeficientes_modelo`) |
-# MAGIC | `random_forest` | Comparação: modelo não linear com todas as features, sem uso no simulador |
+# MAGIC | Modelo | Tipo | Papel |
+# MAGIC |---|---|---|
+# MAGIC | `ultimo_mes` | Referência | Repete o IPCA do mês base (ou o acumulado em 12 meses) |
+# MAGIC | `media_movel_3m`, `_6m`, `_12m` | Referência | Média do IPCA dos últimos 3, 6 ou 12 meses, repetida para os meses seguintes |
+# MAGIC | `sazonal` | Referência | Média histórica do mês do calendário previsto |
+# MAGIC | `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA, com a ordem escolhida por AIC antes do primeiro ano de teste |
+# MAGIC | `ridge` | Regressão | Regressão linear com regularização; os coeficientes vão para `gold.coeficientes_modelo`, base do simulador |
+# MAGIC | `random_forest` | Regressão | Comparação não linear com todas as features |
 # MAGIC
-# MAGIC **Validação:** treino com meses base de 01/2006 a 12/2019, sem alvos depois de 12/2019 (para não vazar o período de teste), e teste nos meses base de 2020 em diante. As métricas (MAE e RMSE em pontos percentuais) e os parâmetros ficam registrados no MLflow.
+# MAGIC **Validação (origem móvel anual):** para cada ano de teste, de 2005 até o ano atual, os modelos são treinados só com meses cujo alvo é anterior a esse ano e testados nos meses base do ano. O erro é resumido por período: 2005–2016, 2017–2019 (inflação baixa e estável), 2020–2021 (pandemia) e 2022 em diante. Métricas e parâmetros ficam registrados no MLflow.
 # MAGIC
-# MAGIC **Previsão atual:** depois da avaliação, o Ridge e o Random Forest são reajustados com todos os meses que têm alvo e aplicados ao mês base mais recente. A faixa de incerteza (80%) vem dos erros do Ridge no período de teste, por isso fica mais larga nos horizontes mais distantes.
+# MAGIC **Previsão atual:** os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente. A faixa de incerteza (80%) vem dos erros do Ridge em todos os anos de teste.
 # MAGIC
 # MAGIC Tabelas gravadas: `gold.coeficientes_modelo`, `gold.metricas_modelo` e `gold.previsoes_ipca`.
 
 # COMMAND ----------
 
 # DBTITLE 1,Parameters
-# Destino das tabelas; o teste em sandbox usa outro schema e um prefixo para não tocar na gold
+# Origem e destino; o teste em sandbox aponta para outras tabelas e usa um prefixo para não tocar na gold
+dbutils.widgets.text("origem", "projeto_hands_on.gold.features_mensal", "Tabela de features")
 dbutils.widgets.text("destino", "projeto_hands_on.gold", "Catálogo.schema de destino")
 dbutils.widgets.text("prefixo_tabela", "", "Prefixo das tabelas de saída")
 
@@ -29,6 +32,7 @@ dbutils.widgets.text("prefixo_tabela", "", "Prefixo das tabelas de saída")
 
 # DBTITLE 1,Environment
 import os
+import warnings
 from datetime import datetime, timezone
 
 import mlflow
@@ -36,19 +40,36 @@ import numpy as np
 import pandas as pd
 from pyspark.sql.functions import col, isnan, when
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import Ridge, RidgeCV
+from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-ORIGEM = "projeto_hands_on.gold.features_mensal"
+ORIGEM = dbutils.widgets.get("origem").strip()
 DESTINO = dbutils.widgets.get("destino").strip()
 PREFIXO = dbutils.widgets.get("prefixo_tabela").strip()
+IPCA_SILVER = "projeto_hands_on.silver.ipca"
 
-FIM_TREINO = "2019-12-01"
+# Primeiro ano de teste: a tabela de features começa em 2001, então o primeiro treino tem 4 anos
+PRIMEIRO_ANO_TESTE = 2005
+# Histórico do IPCA para o ARIMA e as médias móveis: depois da estabilização do Plano Real
+INICIO_HISTORICO_IPCA = "1997-01-01"
+# Períodos de leitura dos resultados, pelo mês previsto
+PERIODOS = {
+    "2005-2016": ("2005-01-01", "2016-12-01"),
+    "2017-2019": ("2017-01-01", "2019-12-01"),
+    "2020-2021": ("2020-01-01", "2021-12-01"),
+    "2022 em diante": ("2022-01-01", "2099-12-01"),
+}
+TODOS = "2005 em diante"
+
 HORIZONTES = list(range(1, 13))
 # Nome do alvo -> coluna da features_mensal
 ALVOS = {**{f"h{h}": f"alvo_ipca_h{h}" for h in HORIZONTES}, "acum_12m": "alvo_ipca_acum_12m"}
+MEDIAS_MOVEIS = [3, 6, 12]
+MODELOS = ["ultimo_mes", "media_movel_3m", "media_movel_6m", "media_movel_12m", "sazonal", "arima", "ridge",
+           "random_forest"]
 
 # Features do Ridge: poucas, interpretáveis e calculáveis a partir dos parâmetros do simulador (Selic e dólar).
 # "ipca_sazonal" é a média histórica do mês previsto (ipca_sazonal_hN do horizonte, ou a composta dos 12 meses).
@@ -83,8 +104,11 @@ FEATURES_RF_EXTRAS = [
 ]
 FEATURES_RF = FEATURES_LINEAR + FEATURES_RF_EXTRAS
 ALPHAS_RIDGE = np.logspace(-2, 3, 30).tolist()
-PARAMS_RF = {"n_estimators": 500, "min_samples_leaf": 3, "random_state": 42, "n_jobs": -1}
-# Faixa de incerteza de 80%: quantis 10% e 90% dos erros do Ridge no teste
+PARAMS_RF = {"n_estimators": 300, "min_samples_leaf": 3, "random_state": 42, "n_jobs": -1}
+# Ordens candidatas do ARIMA: (p, d, q) e sazonal (P, D, Q, 12). O IPCA mensal é estacionário no período, então d = 0
+ORDENS_ARIMA = [(p, 0, q) for p in range(3) for q in range(3)]
+SAZONAIS_ARIMA = [(0, 0, 0, 12), (1, 0, 0, 12), (0, 0, 1, 12), (1, 0, 1, 12)]
+# Faixa de incerteza de 80%: quantis 10% e 90% dos erros do Ridge nos testes
 QUANTIS_FAIXA = (0.10, 0.90)
 
 # COMMAND ----------
@@ -95,35 +119,87 @@ def meses_a_frente(alvo):
     return 12 if alvo == "acum_12m" else int(alvo[1:])
 
 
+def compor(mensais):
+    """Compounds monthly % changes into the accumulated % change (last axis)."""
+    return (np.prod(1 + np.asarray(mensais, dtype=float) / 100, axis=-1) - 1) * 100
+
+
 def preparar(df, alvo):
     """Adds the horizon-specific seasonal column 'ipca_sazonal' and the target column 'y'."""
     dados = df.copy()
     if alvo == "acum_12m":
-        fatores = np.prod([1 + dados[f"ipca_sazonal_h{h}"] / 100 for h in HORIZONTES], axis=0)
-        dados["ipca_sazonal"] = (fatores - 1) * 100
+        dados["ipca_sazonal"] = compor(np.column_stack([dados[f"ipca_sazonal_h{h}"] for h in HORIZONTES]))
     else:
         dados["ipca_sazonal"] = dados[f"ipca_sazonal_h{meses_a_frente(alvo)}"]
     dados["y"] = dados[ALVOS[alvo]]
     return dados
 
 
-def separar_treino_teste(dados, alvo, fim_treino):
-    """Train: base months whose (last) target month is up to fim_treino. Test: base months after fim_treino.
-
-    Base months up to fim_treino whose target falls after it are left out of both, so that no
-    training target overlaps the test period.
-    """
+def separar_por_ano(dados, alvo, ano):
+    """Walk-forward split. Train: rows whose (last) target month is before January of `ano`.
+    Test: base months inside `ano` with a known target."""
     com_alvo = dados[dados["y"].notna()]
+    inicio = pd.Timestamp(year=ano, month=1, day=1)
     mes_alvo = com_alvo["mes_base"] + pd.DateOffset(months=meses_a_frente(alvo))
-    limite = pd.Timestamp(fim_treino)
-    return com_alvo[mes_alvo <= limite], com_alvo[com_alvo["mes_base"] > limite]
+    return com_alvo[mes_alvo < inicio], com_alvo[com_alvo["mes_base"].dt.year == ano]
+
+
+def medias_moveis(ipca, janelas):
+    """Mean of the last k monthly IPCA values up to each month (inclusive), one column per window."""
+    return pd.DataFrame({f"media_movel_{k}m": ipca.rolling(k).mean() for k in janelas})
 
 
 def previsao_referencia(dados, alvo, modelo):
-    """Baseline forecasts: 'ultimo_mes' repeats the last known IPCA, 'sazonal' uses the historical mean."""
+    """Baseline forecasts from columns already in `dados` (moving averages added by the caller)."""
     if modelo == "sazonal":
         return dados["ipca_sazonal"]
-    return dados["ipca_acum_12m"] if alvo == "acum_12m" else dados["ipca_lag1"]
+    if modelo == "ultimo_mes":
+        return dados["ipca_acum_12m"] if alvo == "acum_12m" else dados["ipca_lag1"]
+    # Média móvel: o mesmo valor mensal para todos os meses à frente
+    mensal = dados[modelo]
+    return pd.Series(compor(np.column_stack([mensal] * 12)), index=dados.index) if alvo == "acum_12m" else mensal
+
+
+def periodo_de(mes_previsto):
+    for nome, (inicio, fim) in PERIODOS.items():
+        if pd.Timestamp(inicio) <= mes_previsto <= pd.Timestamp(fim):
+            return nome
+    return None
+
+
+def ajustar_arima(serie, ordem, sazonal):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return SARIMAX(serie, order=ordem, seasonal_order=sazonal, trend="c").fit(disp=False)
+
+
+def escolher_ordem_arima(serie):
+    """Picks the (order, seasonal order) with the lowest AIC on the given history."""
+    candidatos = [(ajustar_arima(serie, o, s).aic, o, s) for o in ORDENS_ARIMA for s in SAZONAIS_ARIMA]
+    _, ordem, sazonal = min(candidatos, key=lambda c: c[0])
+    return ordem, sazonal
+
+
+def previsoes_arima(serie, ordem, sazonal, fim_treino, origens):
+    """Fits the ARIMA on the series up to fim_treino and, keeping those parameters, forecasts the next 12
+    months from each origin using only the data up to that origin. Returns {origin: array of 12 forecasts}."""
+    ajuste = ajustar_arima(serie[serie.index <= fim_treino], ordem, sazonal)
+    previsoes = {}
+    for origem in origens:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            filtrado = ajuste.apply(serie[serie.index <= origem])
+        previsoes[origem] = np.asarray(filtrado.forecast(12), dtype=float)
+    return previsoes
+
+
+def previsao_arima_alvo(previsoes, origem, alvo):
+    valores = previsoes[origem]
+    return float(compor(valores)) if alvo == "acum_12m" else float(valores[meses_a_frente(alvo) - 1])
+
+
+def novo_ridge():
+    return make_pipeline(StandardScaler(), RidgeCV(alphas=ALPHAS_RIDGE, cv=TimeSeriesSplit(n_splits=5)))
 
 
 def coeficientes_originais(modelo, features):
@@ -150,130 +226,181 @@ def metricas(reais, previstos):
 
 # COMMAND ----------
 
-# DBTITLE 1,Load Features
+# DBTITLE 1,Load Data
 features = spark.read.table(ORIGEM).toPandas()
 features["mes_base"] = pd.to_datetime(features["mes_base"])
 features = features.sort_values("mes_base").reset_index(drop=True)
+
+ipca = (
+    spark.read.table(IPCA_SILVER)
+    .filter(col("data_ref") >= INICIO_HISTORICO_IPCA)
+    .select("data_ref", col("valor").cast("double").alias("ipca"))
+    .toPandas()
+)
+serie_ipca = ipca.set_index(pd.to_datetime(ipca["data_ref"]))["ipca"].sort_index().asfreq("MS")
+assert serie_ipca.notna().all(), "Há meses sem IPCA no histórico"
+
+features = features.join(medias_moveis(serie_ipca, MEDIAS_MOVEIS), on="mes_base")
 
 linha_atual = features[features["conjunto"] == "previsao"]
 assert len(linha_atual) == 1, f"Esperada uma linha de previsão em {ORIGEM}, encontradas {len(linha_atual)}"
 assert features["features_completas"].all(), "Há meses base com features nulas na tabela de origem"
 mes_base_atual = linha_atual["mes_base"].iloc[0]
+assert serie_ipca.index[-1] == mes_base_atual, "O último IPCA da silver não é o mês base mais recente das features"
+anos_teste = list(range(PRIMEIRO_ANO_TESTE, mes_base_atual.year + 1))
 print(f"{len(features)} meses base, de {features['mes_base'].min():%m/%Y} a {mes_base_atual:%m/%Y}")
-print(f"Previsão a partir do mês base {mes_base_atual:%m/%Y}")
+print(f"Anos de teste: {anos_teste[0]} a {anos_teste[-1]}; previsão a partir de {mes_base_atual:%m/%Y}")
 
 # COMMAND ----------
 
-# DBTITLE 1,Train, Evaluate and Forecast
+# DBTITLE 1,Walk-Forward Backtest
 usuario = spark.sql("SELECT current_user()").first()[0]
 # No serverless, o MLflow tenta ler o registry da configuração do Spark (bloqueada) se ele não estiver definido
 os.environ.setdefault("MLFLOW_REGISTRY_URI", "databricks-uc")
 mlflow.set_experiment(f"/Users/{usuario}/previsao_ipca")
 agora = datetime.now(timezone.utc).replace(tzinfo=None)
+run = mlflow.start_run(run_name=f"treino_{agora:%Y%m%d_%H%M}")
 
-linhas_metricas, linhas_coeficientes, linhas_previsoes, importancias = [], [], [], []
+# Ordem do ARIMA escolhida só com o histórico anterior ao primeiro ano de teste
+ordem_arima, sazonal_arima = escolher_ordem_arima(
+    serie_ipca[serie_ipca.index < pd.Timestamp(year=PRIMEIRO_ANO_TESTE, month=1, day=1)]
+)
+print(f"ARIMA escolhido: order={ordem_arima}, seasonal_order={sazonal_arima}")
 
-with mlflow.start_run(run_name=f"treino_{agora:%Y%m%d_%H%M}") as run:
-    mlflow.log_params({
-        "fim_treino": FIM_TREINO,
-        "mes_base_previsao": f"{mes_base_atual:%Y-%m}",
-        "features_linear": ",".join(FEATURES_LINEAR),
-        "features_rf": ",".join(FEATURES_RF),
-        "alphas_ridge": f"{ALPHAS_RIDGE[0]:g} a {ALPHAS_RIDGE[-1]:g} ({len(ALPHAS_RIDGE)} valores)",
-        **{f"rf_{k}": v for k, v in PARAMS_RF.items()},
-    })
+preparados = {alvo: preparar(features, alvo) for alvo in ALVOS}
+linhas_teste = []
 
-    for alvo in ALVOS:
-        dados = preparar(features, alvo)
-        treino, teste = separar_treino_teste(dados, alvo, FIM_TREINO)
+for ano in anos_teste:
+    fim_treino = pd.Timestamp(year=ano - 1, month=12, day=1)
+    origens = list(features.loc[features["mes_base"].dt.year == ano, "mes_base"])
+    arima = previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, fim_treino, origens)
 
-        ridge = make_pipeline(StandardScaler(), RidgeCV(alphas=ALPHAS_RIDGE, cv=TimeSeriesSplit(n_splits=5)))
-        ridge.fit(treino[FEATURES_LINEAR], treino["y"])
-        alpha = float(ridge.steps[-1][1].alpha_)
+    for alvo, dados in preparados.items():
+        treino, teste = separar_por_ano(dados, alvo, ano)
+        if teste.empty:
+            continue
+        ridge = novo_ridge().fit(treino[FEATURES_LINEAR], treino["y"])
         rf = RandomForestRegressor(**PARAMS_RF).fit(treino[FEATURES_RF], treino["y"])
+        previstos = {modelo: np.asarray(previsao_referencia(teste, alvo, modelo), dtype=float)
+                     for modelo in MODELOS if modelo not in ("arima", "ridge", "random_forest")}
+        previstos["arima"] = np.array([previsao_arima_alvo(arima, o, alvo) for o in teste["mes_base"]])
+        previstos["ridge"] = ridge.predict(teste[FEATURES_LINEAR])
+        previstos["random_forest"] = rf.predict(teste[FEATURES_RF])
 
-        previstos = {
-            "ultimo_mes": previsao_referencia(teste, alvo, "ultimo_mes"),
-            "sazonal": previsao_referencia(teste, alvo, "sazonal"),
-            "ridge": ridge.predict(teste[FEATURES_LINEAR]),
-            "random_forest": rf.predict(teste[FEATURES_RF]),
-        }
-        inferior, superior = faixa_erro(teste["y"], previstos["ridge"], QUANTIS_FAIXA)
-
-        for modelo, valores in previstos.items():
-            m = metricas(teste["y"], valores)
-            linhas_metricas.append({"alvo": alvo, "horizonte": meses_a_frente(alvo), "modelo": modelo, **m,
-                                    "n_treino": len(treino)})
-            mlflow.log_metrics({f"mae_{modelo}_{alvo}": m["mae"], f"rmse_{modelo}_{alvo}": m["rmse"]})
-
-        # Previsões do período de teste (backtest), para comparar previsto x realizado
         for i, (_, linha) in enumerate(teste.iterrows()):
-            linhas_previsoes.append({
+            mes_previsto = linha["mes_base"] + pd.DateOffset(months=meses_a_frente(alvo))
+            linhas_teste.append({
                 "tipo": "teste",
                 "mes_base": linha["mes_base"],
                 "alvo": alvo,
+                "mes_previsto": mes_previsto,
+                "periodo": periodo_de(mes_previsto),
                 "valor_real": float(linha["y"]),
-                **{f"previsao_{modelo}": float(np.asarray(valores)[i]) for modelo, valores in previstos.items()},
-                "limite_inferior": None,
-                "limite_superior": None,
+                **{f"previsao_{modelo}": float(previstos[modelo][i]) for modelo in MODELOS},
             })
+    print(f"{ano}: {len(origens)} meses base testados")
 
-        # Modelos finais: mesmo alpha e mesmos parâmetros, reajustados com todos os meses que têm alvo
-        com_alvo = dados[dados["y"].notna()]
-        ridge_final = make_pipeline(StandardScaler(), Ridge(alpha=alpha)).fit(com_alvo[FEATURES_LINEAR], com_alvo["y"])
-        rf_final = RandomForestRegressor(**PARAMS_RF).fit(com_alvo[FEATURES_RF], com_alvo["y"])
-
-        intercepto, coeficientes = coeficientes_originais(ridge_final, FEATURES_LINEAR)
-        coluna_sazonal = "ipca_sazonal_h1..h12 (composta)" if alvo == "acum_12m" else f"ipca_sazonal_h{meses_a_frente(alvo)}"
-        for feature, coeficiente in [("intercepto", intercepto), *coeficientes.items()]:
-            linhas_coeficientes.append({
-                "alvo": alvo,
-                "horizonte": meses_a_frente(alvo),
-                "feature": feature,
-                "coluna_origem": coluna_sazonal if feature == "ipca_sazonal" else (None if feature == "intercepto" else feature),
-                "coeficiente": coeficiente,
-                "alpha": alpha,
-                "n_treino": len(com_alvo),
-                "erro_p10": inferior,
-                "erro_p90": superior,
-            })
-
-        atual = dados[dados["mes_base"] == mes_base_atual]
-        previsao_ridge = float(ridge_final.predict(atual[FEATURES_LINEAR])[0])
-        linhas_previsoes.append({
-            "tipo": "previsao",
-            "mes_base": mes_base_atual,
-            "alvo": alvo,
-            "valor_real": None,
-            "previsao_ultimo_mes": float(previsao_referencia(atual, alvo, "ultimo_mes").iloc[0]),
-            "previsao_sazonal": float(previsao_referencia(atual, alvo, "sazonal").iloc[0]),
-            "previsao_ridge": previsao_ridge,
-            "previsao_random_forest": float(rf_final.predict(atual[FEATURES_RF])[0]),
-            "limite_inferior": previsao_ridge + inferior,
-            "limite_superior": previsao_ridge + superior,
-        })
-        importancias += [{"alvo": alvo, "feature": f, "importancia": float(v)}
-                         for f, v in zip(FEATURES_RF, rf.feature_importances_)]
-
-    tabela_metricas = pd.DataFrame(linhas_metricas)
-    mensais = tabela_metricas[tabela_metricas["alvo"] != "acum_12m"].groupby("modelo")["mae"].mean()
-    mlflow.log_metrics({f"mae_medio_h1_h12_{modelo}": float(v) for modelo, v in mensais.items()})
-    mlflow.log_text(tabela_metricas.to_csv(index=False), "metricas.csv")
-    mlflow.log_text(pd.DataFrame(linhas_coeficientes).to_csv(index=False), "coeficientes_ridge.csv")
-    mlflow.log_text(pd.DataFrame(importancias).to_csv(index=False), "importancia_random_forest.csv")
-    run_id = run.info.run_id
-
-print(f"MLflow run: {run_id}")
+backtest = pd.DataFrame(linhas_teste)
 
 # COMMAND ----------
 
-# DBTITLE 1,Model Comparison
-# MAE no teste (p.p.), por alvo e modelo: quanto menor, melhor
-comparacao = tabela_metricas.pivot(index=["horizonte", "alvo"], columns="modelo", values="mae").round(3)
-comparacao["melhor"] = comparacao.idxmin(axis=1)
-display(comparacao.reset_index())
-print("MAE médio de h1 a h12:")
-print(mensais.round(3).sort_values().to_string())
+# DBTITLE 1,Metrics by Period
+linhas_metricas = []
+for alvo in ALVOS:
+    do_alvo = backtest[backtest["alvo"] == alvo]
+    grupos = [(TODOS, do_alvo)] + [(p, do_alvo[do_alvo["periodo"] == p]) for p in PERIODOS]
+    for periodo, grupo in grupos:
+        if grupo.empty:
+            continue
+        for modelo in MODELOS:
+            m = metricas(grupo["valor_real"], grupo[f"previsao_{modelo}"])
+            linhas_metricas.append({"alvo": alvo, "horizonte": meses_a_frente(alvo), "modelo": modelo,
+                                    "periodo": periodo, **m})
+tabela_metricas = pd.DataFrame(linhas_metricas)
+
+# MAE médio de h1 a h12 por período (p.p.): quanto menor, melhor
+mensais = tabela_metricas[tabela_metricas["alvo"] != "acum_12m"]
+resumo = mensais.pivot_table(index="modelo", columns="periodo", values="mae", aggfunc="mean")
+resumo = resumo[[TODOS, *PERIODOS]].loc[MODELOS].round(3)
+display(resumo.reset_index())
+acumulado = tabela_metricas[tabela_metricas["alvo"] == "acum_12m"].pivot(index="modelo", columns="periodo", values="mae")
+display(acumulado[[TODOS, *PERIODOS]].loc[MODELOS].round(3).reset_index())
+
+mlflow.log_params({
+    "primeiro_ano_teste": PRIMEIRO_ANO_TESTE,
+    "mes_base_previsao": f"{mes_base_atual:%Y-%m}",
+    "arima_order": str(ordem_arima),
+    "arima_seasonal_order": str(sazonal_arima),
+    "features_linear": ",".join(FEATURES_LINEAR),
+    "features_rf": ",".join(FEATURES_RF),
+    "alphas_ridge": f"{ALPHAS_RIDGE[0]:g} a {ALPHAS_RIDGE[-1]:g} ({len(ALPHAS_RIDGE)} valores)",
+    **{f"rf_{k}": v for k, v in PARAMS_RF.items()},
+})
+total = tabela_metricas[tabela_metricas["periodo"] == TODOS]
+mlflow.log_metrics({f"mae_{r.modelo}_{r.alvo}": r.mae for r in total.itertuples()})
+mlflow.log_metrics({
+    f"mae_medio_h1_h12_{modelo}_{periodo.replace(' ', '_')}": float(valor)
+    for periodo in resumo.columns for modelo, valor in resumo[periodo].items()
+})
+mlflow.log_text(tabela_metricas.to_csv(index=False), "metricas.csv")
+
+# COMMAND ----------
+
+# DBTITLE 1,Final Models and Current Forecast
+arima_final = previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, mes_base_atual, [mes_base_atual])
+linhas_coeficientes, linhas_previsao, importancias = [], [], []
+
+for alvo, dados in preparados.items():
+    com_alvo = dados[dados["y"].notna()]
+    ridge_final = novo_ridge().fit(com_alvo[FEATURES_LINEAR], com_alvo["y"])
+    rf_final = RandomForestRegressor(**PARAMS_RF).fit(com_alvo[FEATURES_RF], com_alvo["y"])
+    do_alvo = backtest[backtest["alvo"] == alvo]
+    inferior, superior = faixa_erro(do_alvo["valor_real"], do_alvo["previsao_ridge"], QUANTIS_FAIXA)
+
+    intercepto, coeficientes = coeficientes_originais(ridge_final, FEATURES_LINEAR)
+    sazonal_origem = "ipca_sazonal_h1..h12 (composta)" if alvo == "acum_12m" else f"ipca_sazonal_h{meses_a_frente(alvo)}"
+    for feature, coeficiente in [("intercepto", intercepto), *coeficientes.items()]:
+        linhas_coeficientes.append({
+            "alvo": alvo,
+            "horizonte": meses_a_frente(alvo),
+            "feature": feature,
+            "coluna_origem": sazonal_origem if feature == "ipca_sazonal" else (None if feature == "intercepto" else feature),
+            "coeficiente": coeficiente,
+            "alpha": float(ridge_final.steps[-1][1].alpha_),
+            "n_treino": len(com_alvo),
+            "erro_p10": inferior,
+            "erro_p90": superior,
+        })
+
+    atual = dados[dados["mes_base"] == mes_base_atual]
+    previsao_ridge = float(ridge_final.predict(atual[FEATURES_LINEAR])[0])
+    linhas_previsao.append({
+        "tipo": "previsao",
+        "mes_base": mes_base_atual,
+        "alvo": alvo,
+        "mes_previsto": mes_base_atual + pd.DateOffset(months=meses_a_frente(alvo)),
+        "periodo": None,
+        "valor_real": None,
+        **{f"previsao_{m}": float(np.asarray(previsao_referencia(atual, alvo, m))[0])
+           for m in MODELOS if m not in ("arima", "ridge", "random_forest")},
+        "previsao_arima": previsao_arima_alvo(arima_final, mes_base_atual, alvo),
+        "previsao_ridge": previsao_ridge,
+        "previsao_random_forest": float(rf_final.predict(atual[FEATURES_RF])[0]),
+        "limite_inferior": previsao_ridge + inferior,
+        "limite_superior": previsao_ridge + superior,
+    })
+    importancias += [{"alvo": alvo, "feature": f, "importancia": float(v)}
+                     for f, v in zip(FEATURES_RF, rf_final.feature_importances_)]
+
+mlflow.log_text(pd.DataFrame(linhas_coeficientes).to_csv(index=False), "coeficientes_ridge.csv")
+mlflow.log_text(pd.DataFrame(importancias).to_csv(index=False), "importancia_random_forest.csv")
+run_id = run.info.run_id
+mlflow.end_run()
+print(f"MLflow run: {run_id}")
+
+previsao_atual = pd.DataFrame(linhas_previsao)
+display(previsao_atual[["alvo", "mes_previsto", "previsao_ridge", "limite_inferior", "limite_superior",
+                        "previsao_arima", "previsao_sazonal", "previsao_random_forest"]].round(3))
 
 # COMMAND ----------
 
@@ -295,17 +422,15 @@ def gravar(pdf, nome, comentario):
     print(f"{tabela}: {len(pdf)} linhas")
 
 
-previsoes = pd.DataFrame(linhas_previsoes)
+previsoes = pd.concat([previsao_atual, backtest.assign(limite_inferior=None, limite_superior=None)], ignore_index=True)
 previsoes["horizonte"] = previsoes["alvo"].map(meses_a_frente)
-previsoes["mes_previsto"] = [
-    (base + pd.DateOffset(months=h)).date() for base, h in zip(previsoes["mes_base"], previsoes["horizonte"])
-]
 previsoes["mes_base"] = previsoes["mes_base"].dt.date
-colunas_previsoes = [
-    "tipo", "mes_base", "alvo", "horizonte", "mes_previsto", "valor_real", "previsao_ridge", "limite_inferior",
-    "limite_superior", "previsao_random_forest", "previsao_ultimo_mes", "previsao_sazonal",
-]
-previsoes = previsoes[colunas_previsoes].astype({c: "float64" for c in colunas_previsoes[5:]})
+previsoes["mes_previsto"] = pd.to_datetime(previsoes["mes_previsto"]).dt.date
+colunas_valores = ["valor_real", "previsao_ridge", "limite_inferior", "limite_superior",
+                   *[f"previsao_{m}" for m in MODELOS if m != "ridge"]]
+previsoes = previsoes[["tipo", "mes_base", "alvo", "horizonte", "mes_previsto", "periodo", *colunas_valores]]
+previsoes = previsoes.astype({c: "float64" for c in colunas_valores})
+previsoes["periodo"] = previsoes["periodo"].astype(object).where(previsoes["periodo"].notna(), None)
 
 gravar(
     pd.DataFrame(linhas_coeficientes),
@@ -313,10 +438,14 @@ gravar(
     "Coeficientes do Ridge por alvo (h1 a h12 e acum_12m), em unidades originais: "
     "previsao = intercepto + soma(coeficiente * feature). erro_p10/erro_p90 formam a faixa de 80%",
 )
-gravar(tabela_metricas, "metricas_modelo", "Erro no teste (meses base de 2020 em diante) por alvo e modelo, em p.p.")
+gravar(
+    tabela_metricas,
+    "metricas_modelo",
+    "Erro por alvo, modelo e período na validação com origem móvel anual (anos de teste de 2005 em diante), em p.p.",
+)
 gravar(
     previsoes,
     "previsoes_ipca",
     "Previsões do IPCA (%): tipo previsao = a partir do último mês base, com faixa de 80%; "
-    "tipo teste = previsto x realizado no período de teste",
+    "tipo teste = previsto x realizado de cada modelo na validação com origem móvel anual",
 )
