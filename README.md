@@ -58,6 +58,10 @@ databricks.yml                       # Databricks Asset Bundle (pipeline + jobs 
 pyproject.toml                       # Configuração do ruff e do pytest
 requirements-dev.txt                 # Dependências de desenvolvimento (CI e testes locais)
 tests/                               # Testes unitários (rodam sem Databricks)
+docs/                                # Documentação e materiais de apresentação (não executáveis)
+├── catalogo_dados.md                # Catálogo e dicionário de dados (tabelas, colunas, regras e linhagem)
+├── dashboard_bacen.pbix             # Dashboard exploratório no Power BI (câmbio, juros, inflação e qualidade)
+└── EDA Bacen_2026_View.pdf          # Exportação em PDF do dashboard do Power BI
 databricks/
 ├── notebooks/
 │   ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)

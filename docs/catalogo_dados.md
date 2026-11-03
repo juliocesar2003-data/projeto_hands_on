@@ -2,8 +2,8 @@
 
 ## Projeto Hands-on BACEN
 
-- **Versão da documentação:** 1.1
-- **Data de referência:** 02/11/2026
+- **Versão da documentação:** 1.2
+- **Data de referência:** 03/11/2026
 - **Catálogo no Unity Catalog:** `projeto_hands_on`
 - **Responsável:** equipe mantenedora do Projeto Hands-on BACEN
 - **Status:** vigente
@@ -458,8 +458,8 @@ A tabela remove duplicidades por `data_ref`. Essa deduplicação trata repetiç�
 - **Finalidade:** fornecer features e alvos para o modelo de previsão mensal do IPCA.
 - **Granularidade:** uma linha por mês base com IPCA divulgado.
 - **Chave:** `mes_base`.
-- **Período de features:** a partir de 01/2006.
-- **Separação temporal:** treino até 12/2019 e teste a partir de 01/2020.
+- **Período de features:** a partir de 01/2001. A Selic meta começa em 03/1999, e a variação da Selic em 12 meses precisa de um ano dela.
+- **Separação temporal:** validação ano a ano (origem móvel) de 2005 em diante: cada ano é testado com modelos treinados apenas com dados até o fim do ano anterior.
 - **Tipo de objeto:** materialized view.
 - **Consumidores:** treinamento, teste, previsão e simuladores analíticos.
 
@@ -476,7 +476,7 @@ A tabela remove duplicidades por `data_ref`. Essa deduplicação trata repetiç�
 | `mes_calendario` | Integer | Número do mês do calendário |
 | `alvos_disponiveis` | Integer | Quantidade de horizontes conhecidos |
 | `features_completas` | Boolean | Indica completude das features |
-| `conjunto` | String | `treino`, `teste` ou `previsao` |
+| `conjunto` | String | `historico` (com pelo menos um alvo conhecido) ou `previsao` (mês base mais recente) |
 | `data_calculo` | Date/Timestamp | Momento de cálculo |
 
 #### IPCA e sazonalidade
@@ -518,6 +518,8 @@ Unidade predominante: percentual ou pontos percentuais.
 - `usd_vs_selic_z`;
 - `ipca_vs_selic_z`;
 - `usd_vs_ipca_z`.
+
+Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o próprio mês base, sem informação futura. As médias sazonais (`ipca_sazonal_h*`) usam o mesmo início de histórico.
 
 #### Alvos
 
@@ -578,6 +580,120 @@ Unidade predominante: percentual ou pontos percentuais.
 
 ---
 
+## 6.4 `projeto_hands_on.gold.coeficientes_modelo`
+
+### Identificação
+
+- **Finalidade:** registrar os coeficientes da regressão Ridge por alvo, em unidades originais, para uso no simulador.
+- **Granularidade:** uma linha por alvo e feature (inclui o intercepto).
+- **Chave:** `alvo` + `feature`.
+- **Origem:** notebook `treino_modelo_ipca.py`, a partir de `gold.features_mensal`.
+- **Tipo de objeto:** tabela Delta recriada a cada treino (não faz parte do pipeline).
+- **Atualização:** tarefa `treino_modelo` do Job diário, somente quando há IPCA novo.
+
+### Colunas
+
+| Coluna | Tipo | Unidade | Descrição |
+|---|---|---|---|
+| `alvo` | String | Código | `h1` a `h12` ou `acum_12m` |
+| `horizonte` | Long | Meses | Meses entre o mês base e o mês previsto |
+| `feature` | String | Nome técnico | Variável do modelo ou `intercepto` |
+| `coluna_origem` | String | Nome técnico | Coluna de `gold.features_mensal` usada pela feature |
+| `coeficiente` | Double | Conforme a feature | Efeito na previsão: `previsao = intercepto + soma(coeficiente × feature)` |
+| `alpha` | Double | Adimensional | Força da regularização escolhida por validação temporal |
+| `n_treino` | Long | Meses | Meses usados no ajuste final |
+| `erro_p10` | Double | p.p. | Quantil de 10% dos erros nos testes |
+| `erro_p90` | Double | p.p. | Quantil de 90% dos erros nos testes |
+| `run_id` | String | Identificador | Execução correspondente no MLflow |
+| `treinado_em` | Timestamp | UTC | Momento do treino |
+
+---
+
+## 6.5 `projeto_hands_on.gold.parametros_sarimax`
+
+### Identificação
+
+- **Finalidade:** registrar os parâmetros dos modelos SARIMAX, com as variáveis externas juro real e dólar.
+- **Granularidade:** uma linha por modelo e parâmetro.
+- **Chave:** `modelo` + `parametro`.
+- **Origem:** notebook `treino_modelo_ipca.py`, a partir das tabelas Silver de IPCA, Selic e câmbio.
+- **Tipo de objeto:** tabela Delta recriada a cada treino (não faz parte do pipeline).
+
+### Colunas
+
+| Coluna | Tipo | Unidade | Descrição |
+|---|---|---|---|
+| `modelo` | String | Código | `sarimax` ou `sarimax_ampliado` |
+| `parametro` | String | Nome técnico | Variável externa ou termo do modelo (`intercept`, `ar.L1`, `ar.S.L12`, `sigma2`) |
+| `coeficiente` | Double | Conforme o parâmetro | Valor estimado |
+| `erro_padrao` | Double | Conforme o parâmetro | Erro padrão da estimativa |
+| `p_valor` | Double | Probabilidade | Significância estatística |
+| `ic95_inferior` | Double | Conforme o parâmetro | Limite inferior do intervalo de 95% |
+| `ic95_superior` | Double | Conforme o parâmetro | Limite superior do intervalo de 95% |
+| `n_meses` | Long | Meses | Meses usados no ajuste |
+| `run_id` | String | Identificador | Execução correspondente no MLflow |
+| `treinado_em` | Timestamp | UTC | Momento do treino |
+
+---
+
+## 6.6 `projeto_hands_on.gold.metricas_modelo`
+
+### Identificação
+
+- **Finalidade:** comparar o erro dos modelos de previsão do IPCA na validação ano a ano.
+- **Granularidade:** uma linha por alvo, modelo e período.
+- **Chave:** `alvo` + `modelo` + `periodo`.
+- **Origem:** notebook `treino_modelo_ipca.py`.
+- **Tipo de objeto:** tabela Delta recriada a cada treino (não faz parte do pipeline).
+
+### Colunas
+
+| Coluna | Tipo | Unidade | Descrição |
+|---|---|---|---|
+| `alvo` | String | Código | `h1` a `h12` ou `acum_12m` |
+| `horizonte` | Long | Meses | Meses entre o mês base e o mês previsto |
+| `modelo` | String | Código | `ultimo_mes`, `media_movel_3m`, `media_movel_6m`, `media_movel_12m`, `sazonal`, `arima`, `sarimax`, `sarimax_ampliado`, `ridge` ou `random_forest` |
+| `periodo` | String | Período do mês previsto | `2005 em diante`, `2005-2016`, `2017-2019`, `2020-2021` ou `2022 em diante` |
+| `mae` | Double | p.p. | Erro absoluto médio |
+| `rmse` | Double | p.p. | Raiz do erro quadrático médio |
+| `n_teste` | Long | Previsões | Quantidade de previsões avaliadas |
+| `run_id` | String | Identificador | Execução correspondente no MLflow |
+| `treinado_em` | Timestamp | UTC | Momento do treino |
+
+---
+
+## 6.7 `projeto_hands_on.gold.previsoes_ipca`
+
+### Identificação
+
+- **Finalidade:** disponibilizar a previsão atual do IPCA e o previsto × realizado de cada modelo nos anos de teste.
+- **Granularidade:** uma linha por tipo, mês base e alvo.
+- **Chave:** `tipo` + `mes_base` + `alvo`.
+- **Origem:** notebook `treino_modelo_ipca.py`.
+- **Tipo de objeto:** tabela Delta recriada a cada treino (não faz parte do pipeline).
+- **Consumidores:** simulador, sala do Genie e dashboard executivo (planejados).
+
+### Colunas
+
+| Coluna | Tipo | Unidade | Descrição |
+|---|---|---|---|
+| `tipo` | String | Código | `previsao` (a partir do mês base mais recente) ou `teste` (validação ano a ano) |
+| `mes_base` | Date | Mês | Último mês com IPCA conhecido na previsão |
+| `alvo` | String | Código | `h1` a `h12` ou `acum_12m` |
+| `horizonte` | Long | Meses | Meses entre o mês base e o mês previsto |
+| `mes_previsto` | Date | Mês | Mês previsto (no `acum_12m`, o último mês da janela de 12 meses) |
+| `periodo` | String | Período | Período de leitura do resultado; vazio no tipo `previsao` |
+| `valor_real` | Double | % | IPCA realizado; vazio no tipo `previsao` |
+| `previsao_ridge` | Double | % | Previsão da regressão Ridge |
+| `limite_inferior`, `limite_superior` | Double | % | Faixa de 80% da previsão do Ridge; preenchida só no tipo `previsao` |
+| `previsao_ultimo_mes`, `previsao_media_movel_3m`, `previsao_media_movel_6m`, `previsao_media_movel_12m`, `previsao_sazonal` | Double | % | Previsões das referências simples |
+| `previsao_arima`, `previsao_sarimax`, `previsao_sarimax_ampliado` | Double | % | Previsões dos modelos de série temporal |
+| `previsao_random_forest` | Double | % | Previsão do Random Forest |
+| `run_id` | String | Identificador | Execução correspondente no MLflow |
+| `treinado_em` | Timestamp | UTC | Momento do treino |
+
+---
+
 # 7. Matriz de consumo dos produtos
 
 | Produto | Fonte principal | Finalidade |
@@ -586,6 +702,7 @@ Unidade predominante: percentual ou pontos percentuais.
 | Dashboard EDA no Power BI | Silver | Exploração visual e definição de indicadores |
 | Monitoramento de qualidade | `silver.dq_resumo` | Unicidade, cobertura e atualização |
 | Modelo de previsão do IPCA | `gold.features_mensal` | Machine learning e previsão h1 a h12 |
+| Resultados do modelo e MLflow | `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.coeficientes_modelo`, `gold.parametros_sarimax` | Previsão atual, comparação de modelos e rastreabilidade dos treinos |
 | Dashboard de negócio | `gold.bi_economia_mensal` planejada | Consumo executivo e indicadores mensais |
 
 ---
@@ -664,6 +781,11 @@ Unidade predominante: percentual ou pontos percentuais.
 | Lag | Valor defasado em relação ao período de referência |
 | Horizonte hN | N meses após o mês base |
 | Z-score | Valor expresso em desvios padrão em relação à média |
+| Mês base | Último mês com IPCA divulgado, a partir do qual a previsão é feita |
+| Validação ano a ano | Teste em que cada ano é previsto por modelos treinados só com dados até o fim do ano anterior |
+| MAE | Erro absoluto médio: em média, quanto a previsão errou, para cima ou para baixo |
+| ARIMA | Modelo de série temporal que prevê o IPCA a partir do próprio histórico |
+| SARIMAX | ARIMA com variáveis externas, como juro real e variação do dólar |
 
 ---
 
@@ -677,6 +799,7 @@ Unidade predominante: percentual ou pontos percentuais.
 - A tabela `gold.features_mensal` tem finalidade preditiva e não deve ser usada como substituta direta de uma Gold orientada ao BI.
 - O dashboard exploratório consome Silver para preservar flexibilidade analítica.
 - O dashboard executivo deverá consumir tabelas Gold após validação das regras de negócio.
+- As tabelas de resultados do modelo (seções 6.4 a 6.7) são recriadas a cada treino e não passam pelas regras de qualidade do pipeline.
 - Os resultados não constituem recomendação financeira.
 
 ---
@@ -699,3 +822,4 @@ Este documento deve ser revisado quando ocorrer qualquer uma das situações aba
 |---|---|---|
 | 1.0 | 02/11/2026 | Criação inicial com Bronze, Silver, Gold existente e Gold BI planejada |
 | 1.1 | 02/11/2026 | Inclusão do catálogo na documentação versionada do projeto, referência prevista no README e validação automatizada no CI. |
+| 1.2 | 03/11/2026 | `gold.features_mensal` a partir de 01/2001 com validação ano a ano; inclusão das tabelas de resultados do modelo (6.4 a 6.7), de termos no glossário e de teste no CI que verifica se todas as tabelas estão no catálogo. |
