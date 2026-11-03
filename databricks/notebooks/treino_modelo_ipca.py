@@ -10,16 +10,16 @@
 # MAGIC | `ultimo_mes` | Referência | Repete o IPCA do mês base (ou o acumulado em 12 meses) |
 # MAGIC | `media_movel_3m`, `_6m`, `_12m` | Referência | Média do IPCA dos últimos 3, 6 ou 12 meses, repetida para os meses seguintes |
 # MAGIC | `sazonal` | Referência | Média histórica do mês do calendário previsto |
-# MAGIC | `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA, com a ordem escolhida por AIC antes do primeiro ano de teste |
+# MAGIC | `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA, com a ordem escolhida por AIC antes do primeiro ano de teste. **Modelo oficial**: menor erro na validação |
 # MAGIC | `sarimax`, `sarimax_ampliado` | Série temporal | O mesmo SARIMA com variáveis externas do mês anterior: juro real e dólar (e, no ampliado, variação da Selic e do dólar em 3 meses). Nas previsões, elas ficam constantes no último valor conhecido, como num cenário do simulador |
-# MAGIC | `ridge` | Regressão | Regressão linear com regularização; os coeficientes vão para `gold.coeficientes_modelo`, base do simulador |
+# MAGIC | `ridge` | Regressão | Regressão linear com regularização, para comparação; os coeficientes vão para `gold.coeficientes_modelo` |
 # MAGIC | `random_forest` | Regressão | Comparação não linear com todas as features |
 # MAGIC
 # MAGIC **Validação (origem móvel anual):** para cada ano de teste, de 2005 até o ano atual, os modelos são treinados só com meses cujo alvo é anterior a esse ano e testados nos meses base do ano. O erro é resumido por período: 2005–2016, 2017–2019 (inflação baixa e estável), 2020–2021 (pandemia) e 2022 em diante. Métricas e parâmetros ficam registrados no MLflow.
 # MAGIC
-# MAGIC **Previsão atual:** os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente. A faixa de incerteza (80%) vem dos erros do Ridge em todos os anos de teste.
+# MAGIC **Previsão atual:** os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente. A previsão oficial (`previsao_oficial`) é a do ARIMA, e a faixa de incerteza (80%) vem dos erros dele em todos os anos de teste.
 # MAGIC
-# MAGIC Tabelas gravadas: `gold.coeficientes_modelo`, `gold.parametros_sarimax`, `gold.metricas_modelo` e `gold.previsoes_ipca`.
+# MAGIC Tabelas gravadas: `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.parametros_arima` e `gold.coeficientes_modelo`.
 
 # COMMAND ----------
 
@@ -122,7 +122,9 @@ PARAMS_RF = {"n_estimators": 300, "min_samples_leaf": 3, "random_state": 42, "n_
 # Ordens candidatas do ARIMA: (p, d, q) e sazonal (P, D, Q, 12). O IPCA mensal é estacionário no período, então d = 0
 ORDENS_ARIMA = [(p, 0, q) for p in range(3) for q in range(3)]
 SAZONAIS_ARIMA = [(0, 0, 0, 12), (1, 0, 0, 12), (0, 0, 1, 12), (1, 0, 1, 12)]
-# Faixa de incerteza de 80%: quantis 10% e 90% dos erros do Ridge nos testes
+# Modelo da previsão oficial: o ARIMA teve o menor erro na validação ano a ano (2005 em diante)
+MODELO_OFICIAL = "arima"
+# Faixa de incerteza de 80%: quantis 10% e 90% dos erros do modelo nos testes
 QUANTIS_FAIXA = (0.10, 0.90)
 
 # COMMAND ----------
@@ -394,6 +396,7 @@ for ano in anos_teste:
     print(f"{ano}: {len(origens)} meses base testados")
 
 backtest = pd.DataFrame(linhas_teste)
+backtest["previsao_oficial"] = backtest[f"previsao_{MODELO_OFICIAL}"]
 
 # COMMAND ----------
 
@@ -421,6 +424,7 @@ display(acumulado[[TODOS, *PERIODOS]].loc[MODELOS].round(3).reset_index())
 
 mlflow.log_params({
     "primeiro_ano_teste": PRIMEIRO_ANO_TESTE,
+    "modelo_oficial": MODELO_OFICIAL,
     "mes_base_previsao": f"{mes_base_atual:%Y-%m}",
     "arima_order": str(ordem_arima),
     "arima_seasonal_order": str(sazonal_arima),
@@ -442,7 +446,10 @@ mlflow.log_text(tabela_metricas.to_csv(index=False), "metricas.csv")
 
 # DBTITLE 1,Final Models and Current Forecast
 temporais_final = {"arima": previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, mes_base_atual, [mes_base_atual])}
-parametros = []
+parametros = [
+    parametros_sarimax(ajustar_arima(serie_ipca, ordem_arima, sazonal_arima)).assign(modelo="arima",
+                                                                                    n_meses=len(serie_ipca))
+]
 for modelo, colunas in EXOGENAS_SARIMAX.items():
     temporais_final[modelo] = previsoes_arima(serie_sarimax, ordem_arima, sazonal_arima, mes_base_atual,
                                               [mes_base_atual], exog=exogenas[colunas])
@@ -458,7 +465,8 @@ for alvo, dados in preparados.items():
     ridge_final = novo_ridge().fit(com_alvo[FEATURES_LINEAR], com_alvo["y"])
     rf_final = RandomForestRegressor(**PARAMS_RF).fit(com_alvo[FEATURES_RF], com_alvo["y"])
     do_alvo = backtest[backtest["alvo"] == alvo]
-    inferior, superior = faixa_erro(do_alvo["valor_real"], do_alvo["previsao_ridge"], QUANTIS_FAIXA)
+    inferior, superior = faixa_erro(do_alvo["valor_real"], do_alvo["previsao_oficial"], QUANTIS_FAIXA)
+    ridge_inferior, ridge_superior = faixa_erro(do_alvo["valor_real"], do_alvo["previsao_ridge"], QUANTIS_FAIXA)
 
     intercepto, coeficientes = coeficientes_originais(ridge_final, FEATURES_LINEAR)
     sazonal_origem = "ipca_sazonal_h1..h12 (composta)" if alvo == "acum_12m" else f"ipca_sazonal_h{meses_a_frente(alvo)}"
@@ -471,12 +479,13 @@ for alvo, dados in preparados.items():
             "coeficiente": coeficiente,
             "alpha": float(ridge_final.steps[-1][1].alpha_),
             "n_treino": len(com_alvo),
-            "erro_p10": inferior,
-            "erro_p90": superior,
+            "erro_p10": ridge_inferior,
+            "erro_p90": ridge_superior,
         })
 
     atual = dados[dados["mes_base"] == mes_base_atual]
-    previsao_ridge = float(ridge_final.predict(atual[FEATURES_LINEAR])[0])
+    temporais_atuais = {f"previsao_{m}": previsao_arima_alvo(p, mes_base_atual, alvo) for m, p in temporais_final.items()}
+    previsao_oficial = temporais_atuais[f"previsao_{MODELO_OFICIAL}"]
     linhas_previsao.append({
         "tipo": "previsao",
         "mes_base": mes_base_atual,
@@ -486,25 +495,26 @@ for alvo, dados in preparados.items():
         "valor_real": None,
         **{f"previsao_{m}": float(np.asarray(previsao_referencia(atual, alvo, m))[0])
            for m in MODELOS if m not in (*SERIES_TEMPORAIS, "ridge", "random_forest")},
-        **{f"previsao_{m}": previsao_arima_alvo(p, mes_base_atual, alvo) for m, p in temporais_final.items()},
-        "previsao_ridge": previsao_ridge,
+        **temporais_atuais,
+        "previsao_ridge": float(ridge_final.predict(atual[FEATURES_LINEAR])[0]),
         "previsao_random_forest": float(rf_final.predict(atual[FEATURES_RF])[0]),
-        "limite_inferior": previsao_ridge + inferior,
-        "limite_superior": previsao_ridge + superior,
+        "previsao_oficial": previsao_oficial,
+        "limite_inferior": previsao_oficial + inferior,
+        "limite_superior": previsao_oficial + superior,
     })
     importancias += [{"alvo": alvo, "feature": f, "importancia": float(v)}
                      for f, v in zip(FEATURES_RF, rf_final.feature_importances_)]
 
 mlflow.log_text(pd.DataFrame(linhas_coeficientes).to_csv(index=False), "coeficientes_ridge.csv")
 mlflow.log_text(pd.DataFrame(importancias).to_csv(index=False), "importancia_random_forest.csv")
-mlflow.log_text(tabela_parametros.to_csv(index=False), "parametros_sarimax.csv")
+mlflow.log_text(tabela_parametros.to_csv(index=False), "parametros_arima.csv")
 run_id = run.info.run_id
 mlflow.end_run()
 print(f"MLflow run: {run_id}")
 
 previsao_atual = pd.DataFrame(linhas_previsao)
-display(previsao_atual[["alvo", "mes_previsto", "previsao_arima", "previsao_sarimax", "previsao_sarimax_ampliado",
-                        "previsao_ridge", "limite_inferior", "limite_superior", "previsao_sazonal"]].round(3))
+display(previsao_atual[["alvo", "mes_previsto", "previsao_oficial", "limite_inferior", "limite_superior",
+                        "previsao_sarimax", "previsao_ridge", "previsao_sazonal"]].round(3))
 
 # COMMAND ----------
 
@@ -530,8 +540,8 @@ previsoes = pd.concat([previsao_atual, backtest.assign(limite_inferior=None, lim
 previsoes["horizonte"] = previsoes["alvo"].map(meses_a_frente)
 previsoes["mes_base"] = previsoes["mes_base"].dt.date
 previsoes["mes_previsto"] = pd.to_datetime(previsoes["mes_previsto"]).dt.date
-colunas_valores = ["valor_real", "previsao_ridge", "limite_inferior", "limite_superior",
-                   *[f"previsao_{m}" for m in MODELOS if m != "ridge"]]
+colunas_valores = ["valor_real", "previsao_oficial", "limite_inferior", "limite_superior",
+                   *[f"previsao_{m}" for m in MODELOS]]
 previsoes = previsoes[["tipo", "mes_base", "alvo", "horizonte", "mes_previsto", "periodo", *colunas_valores]]
 previsoes = previsoes.astype({c: "float64" for c in colunas_valores})
 previsoes["periodo"] = previsoes["periodo"].astype(object).where(previsoes["periodo"].notna(), None)
@@ -539,15 +549,15 @@ previsoes["periodo"] = previsoes["periodo"].astype(object).where(previsoes["peri
 gravar(
     pd.DataFrame(linhas_coeficientes),
     "coeficientes_modelo",
-    "Coeficientes do Ridge por alvo (h1 a h12 e acum_12m), em unidades originais: "
-    "previsao = intercepto + soma(coeficiente * feature). erro_p10/erro_p90 formam a faixa de 80%",
+    "Coeficientes do Ridge (modelo de comparação) por alvo, em unidades originais: "
+    "previsao = intercepto + soma(coeficiente * feature). erro_p10/erro_p90 formam a faixa de 80% do Ridge",
 )
 gravar(
     tabela_parametros[["modelo", "parametro", "coeficiente", "erro_padrao", "p_valor", "ic95_inferior", "ic95_superior",
                        "n_meses"]],
-    "parametros_sarimax",
-    "Parâmetros dos SARIMAX ajustados com todo o histórico: coeficientes das variáveis externas (mês anterior) "
-    "e dos termos ARIMA, com erro padrão, p-valor e intervalo de 95%",
+    "parametros_arima",
+    "Parâmetros do ARIMA (modelo oficial) e dos SARIMAX ajustados com todo o histórico: termos ARIMA e "
+    "variáveis externas (mês anterior), com erro padrão, p-valor e intervalo de 95%",
 )
 gravar(
     tabela_metricas,
@@ -557,6 +567,6 @@ gravar(
 gravar(
     previsoes,
     "previsoes_ipca",
-    "Previsões do IPCA (%): tipo previsao = a partir do último mês base, com faixa de 80%; "
+    "Previsões do IPCA (%): previsao_oficial = ARIMA; tipo previsao = a partir do último mês base, com faixa de 80%; "
     "tipo teste = previsto x realizado de cada modelo na validação com origem móvel anual",
 )

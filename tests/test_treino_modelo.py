@@ -249,3 +249,9 @@ def test_alinhar_descarta_meses_sem_todas_as_exogenas(fx):
     # O IPCA de t usa a exógena de t-1: o primeiro mês com "b" defasado é março
     assert list(endog.index) == list(meses[3:])
     assert defasadas.notna().all().all() and defasadas["a"].iloc[0] == 3.0
+
+
+def test_modelo_oficial_e_o_arima():
+    # A previsão oficial e a faixa de incerteza vêm do modelo com menor erro na validação ano a ano
+    assert carregar_constante(NOTEBOOK, "MODELO_OFICIAL") == "arima"
+    assert 'SERIES_TEMPORAIS = ["arima"' in NOTEBOOK.read_text(encoding="utf-8")

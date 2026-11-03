@@ -584,7 +584,7 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 
 ### Identificação
 
-- **Finalidade:** registrar os coeficientes da regressão Ridge por alvo, em unidades originais, para uso no simulador.
+- **Finalidade:** registrar os coeficientes da regressão Ridge (modelo de comparação) por alvo, em unidades originais.
 - **Granularidade:** uma linha por alvo e feature (inclui o intercepto).
 - **Chave:** `alvo` + `feature`.
 - **Origem:** notebook `treino_modelo_ipca.py`, a partir de `gold.features_mensal`.
@@ -602,18 +602,18 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 | `coeficiente` | Double | Conforme a feature | Efeito na previsão: `previsao = intercepto + soma(coeficiente × feature)` |
 | `alpha` | Double | Adimensional | Força da regularização escolhida por validação temporal |
 | `n_treino` | Long | Meses | Meses usados no ajuste final |
-| `erro_p10` | Double | p.p. | Quantil de 10% dos erros nos testes |
-| `erro_p90` | Double | p.p. | Quantil de 90% dos erros nos testes |
+| `erro_p10` | Double | p.p. | Quantil de 10% dos erros do Ridge nos testes |
+| `erro_p90` | Double | p.p. | Quantil de 90% dos erros do Ridge nos testes |
 | `run_id` | String | Identificador | Execução correspondente no MLflow |
 | `treinado_em` | Timestamp | UTC | Momento do treino |
 
 ---
 
-## 6.5 `projeto_hands_on.gold.parametros_sarimax`
+## 6.5 `projeto_hands_on.gold.parametros_arima`
 
 ### Identificação
 
-- **Finalidade:** registrar os parâmetros dos modelos SARIMAX, com as variáveis externas juro real e dólar.
+- **Finalidade:** registrar os parâmetros do ARIMA, modelo oficial da previsão, e dos SARIMAX, que acrescentam as variáveis externas juro real e dólar.
 - **Granularidade:** uma linha por modelo e parâmetro.
 - **Chave:** `modelo` + `parametro`.
 - **Origem:** notebook `treino_modelo_ipca.py`, a partir das tabelas Silver de IPCA, Selic e câmbio.
@@ -623,7 +623,7 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 
 | Coluna | Tipo | Unidade | Descrição |
 |---|---|---|---|
-| `modelo` | String | Código | `sarimax` ou `sarimax_ampliado` |
+| `modelo` | String | Código | `arima`, `sarimax` ou `sarimax_ampliado` |
 | `parametro` | String | Nome técnico | Variável externa ou termo do modelo (`intercept`, `ar.L1`, `ar.S.L12`, `sigma2`) |
 | `coeficiente` | Double | Conforme o parâmetro | Valor estimado |
 | `erro_padrao` | Double | Conforme o parâmetro | Erro padrão da estimativa |
@@ -684,8 +684,9 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 | `mes_previsto` | Date | Mês | Mês previsto (no `acum_12m`, o último mês da janela de 12 meses) |
 | `periodo` | String | Período | Período de leitura do resultado; vazio no tipo `previsao` |
 | `valor_real` | Double | % | IPCA realizado; vazio no tipo `previsao` |
+| `previsao_oficial` | Double | % | Previsão oficial, do modelo ARIMA |
+| `limite_inferior`, `limite_superior` | Double | % | Faixa de 80% da previsão oficial, a partir dos erros do ARIMA nos testes; preenchida só no tipo `previsao` |
 | `previsao_ridge` | Double | % | Previsão da regressão Ridge |
-| `limite_inferior`, `limite_superior` | Double | % | Faixa de 80% da previsão do Ridge; preenchida só no tipo `previsao` |
 | `previsao_ultimo_mes`, `previsao_media_movel_3m`, `previsao_media_movel_6m`, `previsao_media_movel_12m`, `previsao_sazonal` | Double | % | Previsões das referências simples |
 | `previsao_arima`, `previsao_sarimax`, `previsao_sarimax_ampliado` | Double | % | Previsões dos modelos de série temporal |
 | `previsao_random_forest` | Double | % | Previsão do Random Forest |
@@ -702,7 +703,7 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 | Dashboard EDA no Power BI | Silver | Exploração visual e definição de indicadores |
 | Monitoramento de qualidade | `silver.dq_resumo` | Unicidade, cobertura e atualização |
 | Modelo de previsão do IPCA | `gold.features_mensal` | Machine learning e previsão h1 a h12 |
-| Resultados do modelo e MLflow | `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.coeficientes_modelo`, `gold.parametros_sarimax` | Previsão atual, comparação de modelos e rastreabilidade dos treinos |
+| Resultados do modelo e MLflow | `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.parametros_arima`, `gold.coeficientes_modelo` | Previsão atual, comparação de modelos e rastreabilidade dos treinos |
 | Dashboard de negócio | `gold.bi_economia_mensal` planejada | Consumo executivo e indicadores mensais |
 
 ---
@@ -822,4 +823,4 @@ Este documento deve ser revisado quando ocorrer qualquer uma das situações aba
 |---|---|---|
 | 1.0 | 02/11/2026 | Criação inicial com Bronze, Silver, Gold existente e Gold BI planejada |
 | 1.1 | 02/11/2026 | Inclusão do catálogo na documentação versionada do projeto, referência prevista no README e validação automatizada no CI. |
-| 1.2 | 03/11/2026 | `gold.features_mensal` a partir de 01/2001 com validação ano a ano; inclusão das tabelas de resultados do modelo (6.4 a 6.7), de termos no glossário e de teste no CI que verifica se todas as tabelas estão no catálogo. |
+| 1.2 | 03/11/2026 | `gold.features_mensal` a partir de 01/2001 com validação ano a ano; inclusão das tabelas de resultados do modelo (6.4 a 6.7), com o ARIMA como modelo oficial, de termos no glossário e de teste no CI que verifica se todas as tabelas estão no catálogo. |
