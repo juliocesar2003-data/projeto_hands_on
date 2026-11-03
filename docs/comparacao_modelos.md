@@ -33,6 +33,19 @@ O ARIMA escolhido é o SARIMA(1,0,0)(1,0,0,12): o IPCA de um mês depende do mê
 - **junta as duas regras simples:** a inércia do último mês e a sazonalidade do mesmo mês do ano anterior, com pesos estimados nos dados. Por isso erra menos que cada uma delas sozinha;
 - **é simples e estável:** tem três parâmetros, todos significativos, e usa só o histórico do IPCA.
 
+## Métricas de teste do ARIMA
+
+| Horizonte | Previsões | MAE (p.p.) | RMSE (p.p.) | Viés (p.p.) | R² | Redução do MAE sobre "último mês" |
+|---|---|---|---|---|---|---|
+| Mês seguinte (h1) | 260 | 0,206 | 0,280 | −0,021 | 0,29 | 12,3% |
+| 2 meses à frente (h2) | 259 | 0,235 | 0,313 | −0,037 | 0,12 | 19,1% |
+| 3 meses à frente (h3) | 258 | 0,244 | 0,327 | −0,047 | 0,03 | 25,2% |
+
+- **MAE:** erro médio, para cima ou para baixo.
+- **RMSE:** como o MAE, mas pune mais os erros grandes.
+- **Viés:** real menos previsto. Negativo indica previsão, em média, acima do realizado.
+- **R²:** quanto o modelo explica além da média do período de teste. A capacidade de explicação cai rápido: 0,29 no mês seguinte e quase zero em 3 meses.
+
 ## Por que não os outros
 
 - **Médias móveis:** as curtas (3 e 6 meses) foram as melhores em 2017–2019, quando a inflação caiu, porque se adaptam rápido. Nos outros períodos erram mais.
