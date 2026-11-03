@@ -32,7 +32,7 @@ resources:
 
     ingestao_diaria_bacen:
       name: Ingestão Diária BACEN (Agendada)
-      description: Ingestão diária incremental da API do BACEN seguida da atualização do pipeline.
+      description: Ingestão diária incremental da API do BACEN, atualização do pipeline e treino do modelo de previsão do IPCA.
       max_concurrent_runs: 1
       schedule:
         quartz_cron_expression: "0 0 21 * * ?"
@@ -54,6 +54,12 @@ resources:
           run_if: ALL_DONE
           pipeline_task:
             pipeline_id: ${resources.pipelines.pipeline_bacen.id}
+        - task_key: treino_modelo
+          depends_on:
+            - task_key: atualiza_pipeline
+          # Retrains with the updated gold.features_mensal and refreshes the forecasts
+          notebook_task:
+            notebook_path: ./databricks/notebooks/treino_modelo_ipca.py
 
 targets:
   prod:

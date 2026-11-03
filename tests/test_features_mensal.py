@@ -21,9 +21,10 @@ def test_metas_cobrem_todos_os_anos_da_tabela():
     assert all(METAS[ano][:2] == (3.00, 1.50) for ano in anos if ano >= 2025)
 
 
-def test_treino_comeca_no_inicio_da_tabela():
-    assert carregar_constante(GOLD, "INICIO_TREINO") == carregar_constante(GOLD, "INICIO_FEATURES")
-    assert carregar_constante(GOLD, "FIM_TREINO") < "2020-01-01"
+def test_historico_comeca_antes_das_features():
+    # Médias sazonais e z-scores precisam de anos anteriores ao primeiro mês base
+    historico = carregar_constante(GOLD, "INICIO_HISTORICO")
+    assert int(historico[:4]) + 4 <= int(carregar_constante(GOLD, "INICIO_FEATURES")[:4])
 
 
 def test_comparacoes_usam_colunas_padronizadas():

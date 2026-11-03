@@ -35,6 +35,13 @@ Spark Declarative Pipeline (serverless)
       └─ Gold: materialized views
            gold.metas_inflacao — metas de inflação do CMN por ano
            gold.features_mensal — base do modelo de previsão do IPCA (features + alvos h1 a h12)
+                 │
+                 ▼
+Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento previsao_ipca)
+   gold.coeficientes_modelo — coeficientes do Ridge por horizonte (base do simulador)
+   gold.parametros_sarimax — coeficientes dos SARIMAX, com erro padrão e p-valor
+   gold.metricas_modelo — erro por horizonte, modelo e período (validação ano a ano)
+   gold.previsoes_ipca — previsão dos próximos 12 meses de cada modelo + previsto × realizado
 ```
 
 ## Estrutura do repositório
@@ -52,6 +59,7 @@ databricks/
 │   ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)
 │   ├── ingestao_diaria_bacen.py     # Ingestão diária incremental (somente registros novos)
 │   ├── eda_bacen.py                 # Análise exploratória sobre as tabelas silver
+│   ├── treino_modelo_ipca.py        # Treino e previsão do IPCA (MLflow → tabelas gold do modelo)
 │   └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
 └── transformations/
     ├── bronze/
@@ -185,12 +193,11 @@ No treino não há vazamento: cada linha só usa dados que já existiam quando o
 
 ### Período e conjuntos
 
-Meses base de 01/2006 até o último IPCA divulgado (20 anos). A coluna `conjunto` separa:
+Meses base de 01/2001 até o último IPCA divulgado. O início em 2001 vem da Selic: a série da meta começa em 03/1999, e a variação em 12 meses precisa de um ano dela. Médias sazonais e z-scores usam o histórico desde 01/1997, depois da estabilização do Plano Real. A coluna `conjunto` separa:
 
 | Conjunto | Meses base | Uso |
 |---|---|---|
-| `treino` | 01/2006 a 12/2019 | Ajuste do modelo e cálculo dos z-scores |
-| `teste` | 01/2020 em diante, com pelo menos um alvo conhecido | Avaliação do erro por horizonte |
+| `historico` | Com pelo menos um alvo conhecido | Treino e testes do modelo (validação ano a ano) |
 | `previsao` | Último mês base (nenhum alvo conhecido) | Previsão atual |
 
 ### Colunas
@@ -211,11 +218,83 @@ Nomenclatura: `lagN` = N meses antes do mês previsto em `h1` (`lag1` é o próp
 | Comparações | `usd_vs_selic_z`, `ipca_vs_selic_z`, `usd_vs_ipca_z` | desvios padrão |
 | Alvos | `alvo_ipca_h1` … `alvo_ipca_h12`, `alvo_ipca_acum_12m` | % |
 
-**Comparações entre indicadores:** o dólar varia em % e a Selic em pontos percentuais, então a diferença direta não tem significado. Cada variação é padronizada em z-score (`(valor − média) / desvio padrão`, com média e desvio calculados só no período de treino), e a comparação é a diferença dos z-scores. Exemplo: `usd_vs_selic_z = 1,5` significa que, em 12 meses, o dólar subiu 1,5 desvio padrão a mais (em relação ao normal dele) do que a Selic (em relação ao normal dela).
+**Comparações entre indicadores:** o dólar varia em % e a Selic em pontos percentuais, então a diferença direta não tem significado. Cada variação é padronizada em z-score (`(valor − média) / desvio padrão`, com média e desvio do histórico desde 1997 até o próprio mês base, então nenhuma linha usa informação futura), e a comparação é a diferença dos z-scores. Exemplo: `usd_vs_selic_z = 1,5` significa que, em 12 meses, o dólar subiu 1,5 desvio padrão a mais (em relação ao normal dele) do que a Selic (em relação ao normal dela).
 
 ### Metas de inflação (`gold.metas_inflacao`)
 
-Tabela de referência com a meta do CMN por ano (`ano`, `meta`, `tolerancia_pp`, `limite_inferior`, `limite_superior`, `norma`), mantida no código (`METAS_INFLACAO`) a partir do [histórico do Banco Central](https://www.bcb.gov.br/controleinflacao/historicometas). De 2006 a 2018 a meta foi 4,50%, caindo até 3,00% em 2024. Desde 2025 vale a meta contínua de 3,00% ± 1,5 p.p. (Resolução CMN nº 5.141), medida no IPCA acumulado em 12 meses. **Quando o CMN definir a meta de um novo ano, é preciso incluí-la em `METAS_INFLACAO`**; a regra de qualidade `meta_cadastrada` sinaliza meses sem meta.
+Tabela de referência com a meta do CMN por ano (`ano`, `meta`, `tolerancia_pp`, `limite_inferior`, `limite_superior`, `norma`), mantida no código (`METAS_INFLACAO`) a partir do [histórico do Banco Central](https://www.bcb.gov.br/controleinflacao/historicometas). De 2005 a 2018 a meta foi 4,50%, caindo até 3,00% em 2024. Em 2003 e 2004 a meta foi revista pelo CMN; a tabela usa a última definida (4,00% e 5,50%). Desde 2025 vale a meta contínua de 3,00% ± 1,5 p.p. (Resolução CMN nº 5.141), medida no IPCA acumulado em 12 meses. **Quando o CMN definir a meta de um novo ano, é preciso incluí-la em `METAS_INFLACAO`**; a regra de qualidade `meta_cadastrada` sinaliza meses sem meta.
+
+## Modelo de previsão do IPCA
+
+O notebook `databricks/notebooks/treino_modelo_ipca.py` treina **um modelo por horizonte** (estratégia direta): o IPCA de cada um dos próximos 12 meses (`h1` a `h12`) e o IPCA acumulado em 12 meses (`acum_12m`), a partir de `gold.features_mensal`. Ele roda como última tarefa do Job diário. Como a validação completa leva de 6 a 12 minutos e só muda quando sai um IPCA novo, o notebook termina logo no início nos dias sem IPCA novo e mantém as tabelas do último treino. Para retreinar sem IPCA novo (por exemplo, depois de mudar o código do modelo), rode o notebook com o parâmetro `forcar_treino = sim`.
+
+### Modelos comparados
+
+| Modelo | Tipo | Como prevê |
+|---|---|---|
+| `ultimo_mes` | Referência | Repete o IPCA do mês base (ou o acumulado em 12 meses) |
+| `media_movel_3m`, `media_movel_6m`, `media_movel_12m` | Referência | Média do IPCA dos últimos 3, 6 ou 12 meses, repetida para os meses seguintes |
+| `sazonal` | Referência | Média histórica do mês do calendário previsto |
+| `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA desde 1997. A ordem é escolhida por AIC entre 36 combinações, com os dados anteriores a 2005; a escolhida foi (1,0,0)(1,0,0,12): o mês anterior e o mesmo mês do ano anterior |
+| `sarimax` | Série temporal | O mesmo SARIMA com variáveis externas do mês anterior: `juro_real_12m` e `usd_var_12m`. Nas previsões, elas ficam constantes no último valor conhecido, como num cenário do simulador |
+| `sarimax_ampliado` | Série temporal | O SARIMAX com também `selic_var_12m_pp` e `usd_var_3m` |
+| `ridge` | Regressão | Regressão linear com regularização, com features calculáveis a partir dos parâmetros do simulador: `ipca_lag1`, `ipca_acum_3m`, `ipca_12m_menos_meta`, `ipca_sazonal`, `juro_real_12m`, `selic_var_12m_pp`, `usd_var_3m` e `usd_var_12m`. Os coeficientes vão para `gold.coeficientes_modelo` |
+| `random_forest` | Regressão | Comparação não linear, com todas as features (inclusive as comparações em z-score) |
+
+### Validação ano a ano (origem móvel)
+
+Para cada ano de teste, de 2005 até o ano atual, todos os modelos são treinados apenas com meses cujo alvo é anterior a esse ano e testados nos meses base do ano. O ARIMA reestima os parâmetros a cada ano com o IPCA até dezembro do ano anterior. Isso dá cerca de 250 meses de teste por horizonte, em condições diferentes, resumidos por período do mês previsto:
+
+| Período | Meses de teste (h1) | Contexto |
+|---|---|---|
+| 2005–2016 | 143 | Regime de metas, com a crise de 2008 e a alta de 2015 |
+| 2017–2019 | 36 | Inflação baixa e estável (2017 abaixo do piso da meta) |
+| 2020–2021 | 24 | Pandemia |
+| 2022 em diante | 57 | Pós-pandemia |
+
+Métricas (MAE e RMSE, em pontos percentuais), parâmetros, coeficientes e importância das features ficam registrados no MLflow (experimento `/Users/<usuário>/previsao_ipca`).
+
+### Resultados
+
+MAE médio de h1 a h12 (p.p.; menor é melhor):
+
+| Modelo | 2005 em diante | 2005–2016 | 2017–2019 | 2020–2021 | 2022 em diante |
+|---|---|---|---|---|---|
+| ARIMA | **0,247** | **0,202** | 0,295 | **0,368** | **0,274** |
+| Sazonal | 0,260 | 0,212 | 0,317 | 0,418 | **0,274** |
+| Média móvel 12m | 0,267 | 0,221 | 0,281 | 0,400 | 0,312 |
+| Ridge | 0,276 | 0,244 | 0,300 | 0,409 | 0,285 |
+| Média móvel 6m | 0,279 | 0,239 | **0,259** | 0,385 | 0,340 |
+| SARIMAX | 0,292 | 0,276 | 0,261 | 0,415 | 0,301 |
+| SARIMAX ampliado | 0,293 | 0,273 | 0,263 | 0,409 | 0,310 |
+| Média móvel 3m | 0,297 | 0,257 | 0,262 | 0,403 | 0,373 |
+| Random Forest | 0,315 | 0,266 | 0,315 | 0,369 | 0,410 |
+| Último mês | 0,322 | 0,273 | 0,297 | 0,433 | 0,411 |
+
+IPCA acumulado em 12 meses (MAE em p.p.): ARIMA 1,735; sazonal 1,946; último mês 2,014; Ridge 2,405; SARIMAX 2,538; SARIMAX ampliado 2,573; Random Forest 3,223.
+
+- **O ARIMA tem o menor erro em todos os horizontes** e em quase todos os períodos. Ele acerta mais que o Ridge em cerca de 60% dos meses testados em cada período.
+- **O Ridge depende de muitos dados de treino.** A diferença para o ARIMA é grande entre 2005 e 2008, quando o treino tinha de 36 a 80 meses, e fica pequena a partir de 2014. A primeira validação (treino 2006–2019, teste 2020 em diante) mostrava o Ridge na frente; com 22 anos de teste, esse resultado não se mantém.
+- **Em 2017–2019, todos os modelos previram inflação acima da realizada** (viés de −0,15 a −0,21 p.p. por mês): a inflação caiu para mínimas históricas, e as médias móveis curtas, que se adaptam mais rápido, foram as melhores.
+- **Na pandemia, todos subestimaram a inflação** e tiveram os maiores erros.
+- **O SARIMAX não melhorou o ARIMA.** Com juro real e dólar como variáveis externas, o erro médio subiu de 0,247 para 0,292, e cresce com o horizonte, porque as variáveis ficam constantes no último valor conhecido. Ele só foi melhor em 2017–2019 (acertou mais que o ARIMA em 70% dos meses), quando a queda do dólar e o juro real alto anteciparam a inflação baixa.
+- **O efeito do juro real não é identificável nesses dados.** No SARIMAX ajustado com todo o histórico, o coeficiente do juro real é +0,015 p.p. por ponto (p-valor 0,13, intervalo de 95% de −0,004 a +0,034): positivo e não significativo. A causalidade corre nos dois sentidos, porque o Banco Central sobe a Selic quando a inflação sobe. O repasse do dólar tem o sinal esperado: +0,003 p.p. no IPCA mensal por ponto de alta em 12 meses (p-valor 0,09); no modelo ampliado, +0,006 (p-valor 0,01). Os parâmetros ficam em `gold.parametros_sarimax`.
+- **O Ridge do acumulado em 12 meses é instável:** retreinado com todo o histórico, o coeficiente do juro real sai positivo, ao contrário do esperado. Antes de ligar o simulador, o modelo dos cenários precisa ser revisto (próximo passo).
+
+### Previsão atual e faixa de incerteza
+
+Depois da validação, os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente. A faixa de 80% do Ridge soma à previsão os quantis de 10% e 90% dos erros dele em todos os anos de teste.
+
+### Tabelas gravadas
+
+| Tabela | Conteúdo |
+|---|---|
+| `gold.coeficientes_modelo` | Por alvo: `intercepto` e um coeficiente por feature do Ridge, em unidades originais (`previsao = intercepto + soma(coeficiente × feature)`), mais `alpha`, `erro_p10` e `erro_p90` |
+| `gold.parametros_sarimax` | Coeficientes dos SARIMAX ajustados com todo o histórico (variáveis externas e termos ARIMA), com erro padrão, p-valor e intervalo de 95% |
+| `gold.metricas_modelo` | MAE, RMSE e quantidade de meses de teste por alvo, modelo e período (`2005 em diante`, `2005-2016`, `2017-2019`, `2020-2021`, `2022 em diante`) |
+| `gold.previsoes_ipca` | `tipo = previsao`: os 13 alvos a partir do último mês base, com a previsão de cada modelo e a faixa do Ridge. `tipo = teste`: previsto × realizado de cada modelo em cada ano de teste, com o período |
+
+As quatro tabelas são recriadas a cada treino e trazem `run_id` (execução do MLflow) e `treinado_em`.
 
 ## Jobs
 
@@ -233,6 +312,7 @@ Job para rodar sem acompanhamento, com a seguinte configuração:
 |---|---|
 | Tarefa 1 — `ingestao_diaria` | Notebook `databricks/notebooks/ingestao_diaria_bacen.py`, compute serverless |
 | Tarefa 2 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente da tarefa 1 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
+| Tarefa 3 — `treino_modelo` | Notebook `databricks/notebooks/treino_modelo_ipca.py`, compute serverless, depois da atualização do pipeline: retreina o modelo e atualiza as previsões |
 | Agendamento | Diário às 21:00, fuso `America/Sao_Paulo` (após a publicação da PTAX e dos indicadores do dia) |
 | Retentativas | 2 retentativas na tarefa 1, com intervalo de 10 minutos |
 | Notificações | E-mail em caso de falha (para o usuário dono do token usado no deploy) |
