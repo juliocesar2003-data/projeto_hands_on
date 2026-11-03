@@ -2,6 +2,10 @@
 
 Pipeline de dados em camadas (bronze / silver / gold) no Databricks que ingere cotações de câmbio e indicadores econômicos da API do Banco Central do Brasil, cobrindo todo o histórico disponível desde a data mais antiga de cada série (a partir de 1980) até a data atual. A carga histórica é feita uma única vez (até 31/12/2025, mais o complemento de 01/01/2026 até o dia da carga) e, a partir daí, uma ingestão diária agendada busca apenas os registros novos, sem repetição. A API do BACEN permite no máximo 10 anos por consulta, então os dados são extraídos em janelas de 10 anos.
 
+## Catálogo de Dados
+
+A documentação das tabelas, colunas, regras de negócio, qualidade e linhagem dos dados deste projeto está disponível no [Catálogo e Dicionário de Dados](docs/catalogo_dados.md).
+
 ## Arquitetura
 
 ```
