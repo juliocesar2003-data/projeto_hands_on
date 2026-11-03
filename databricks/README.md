@@ -38,8 +38,8 @@ Spark Declarative Pipeline (serverless)
                  │
                  ▼
 Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento previsao_ipca)
-   gold.coeficientes_modelo — coeficientes do Ridge por horizonte (base do simulador)
-   gold.parametros_sarimax — coeficientes dos SARIMAX, com erro padrão e p-valor
+   gold.parametros_arima — parâmetros do ARIMA (modelo oficial) e dos SARIMAX, com erro padrão e p-valor
+   gold.coeficientes_modelo — coeficientes do Ridge por horizonte (comparação)
    gold.metricas_modelo — erro por horizonte, modelo e período (validação ano a ano)
    gold.previsoes_ipca — previsão dos próximos 12 meses de cada modelo + previsto × realizado
 ```
