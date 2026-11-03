@@ -60,6 +60,7 @@ requirements-dev.txt                 # Dependências de desenvolvimento (CI e te
 tests/                               # Testes unitários (rodam sem Databricks)
 docs/                                # Documentação e materiais de apresentação (não executáveis)
 ├── catalogo_dados.md                # Catálogo e dicionário de dados (tabelas, colunas, regras e linhagem)
+├── comparacao_modelos.md            # Resumo da comparação dos modelos de previsão do IPCA e da escolha do ARIMA
 ├── dashboard_bacen.pbix             # Dashboard exploratório no Power BI (câmbio, juros, inflação e qualidade)
 └── EDA Bacen_2026_View.pdf          # Exportação em PDF do dashboard do Power BI
 databricks/
