@@ -13,6 +13,8 @@ TABELAS = {
     "cdi": (["data_ref"], "data_ref", 38),
     "tr": (["data_ref", "data_fim"], "data_ref", 7),
     "ipca": (["data_ref"], "data_ref", 75),
+    # Pesquisa Focus: publicada em dias úteis, com até 7 dias sem pesquisa em feriados prolongados
+    "focus_ipca": (["fonte", "data_pesquisa", "mes_referencia"], "data_pesquisa", 7),
 }
 
 

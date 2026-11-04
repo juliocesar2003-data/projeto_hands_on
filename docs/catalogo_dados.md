@@ -2,8 +2,8 @@
 
 ## Projeto Hands-on BACEN
 
-- **Versão da documentação:** 1.2
-- **Data de referência:** 03/11/2026
+- **Versão da documentação:** 1.3
+- **Data de referência:** 04/11/2026
 - **Catálogo no Unity Catalog:** `projeto_hands_on`
 - **Responsável:** equipe mantenedora do Projeto Hands-on BACEN
 - **Status:** vigente
@@ -74,6 +74,8 @@ Os dados são obtidos da API do **Sistema Gerenciador de Séries Temporais (SGS)
 | GBP/BRL | 21623 | Diária | 01/07/1994 |
 | ARS/BRL | 21632 | Diária | 01/07/1994 |
 
+O projeto também consome a API de Expectativas do Banco Central: as expectativas de IPCA mensal do Boletim Focus (desde 2000) e do ranking Top 5 de curto prazo (desde 2001).
+
 ### 3.1 Estratégia de ingestão
 
 - A carga histórica consulta a API em janelas de no máximo dez anos.
@@ -82,6 +84,7 @@ Os dados são obtidos da API do **Sistema Gerenciador de Séries Temporais (SGS)
 - Cada execução incremental grava um novo arquivo NDJSON no volume.
 - Os arquivos não são sobrescritos durante a ingestão diária.
 - O Auto Loader identifica os novos arquivos e alimenta as tabelas Bronze.
+- O Focus tem ingestão própria (`ingestao_focus.py`), que parte da última data de pesquisa gravada no volume `bronze.raw_focus`.
 
 ---
 
@@ -187,6 +190,50 @@ Os dados são obtidos da API do **Sistema Gerenciador de Séries Temporais (SGS)
 - **Chave lógica:** `data`.
 - **Tipo de objeto:** streaming table.
 - **Colunas e regras:** iguais às colunas comuns dos indicadores Bronze.
+
+---
+
+## 4.6 `projeto_hands_on.bronze.bronze_focus_mensal`
+
+- **Finalidade:** armazenar as expectativas brutas de IPCA mensal do Boletim Focus, com todas as instituições.
+- **Origem:** API de Expectativas do BCB (`ExpectativaMercadoMensais`, `baseCalculo = 0`), em arquivos NDJSON no volume `bronze.raw_focus`.
+- **Granularidade:** uma linha por data da pesquisa e mês de referência.
+- **Chave lógica:** `Data` + `DataReferencia`.
+- **Tipo de objeto:** streaming table.
+
+### Colunas
+
+| Coluna | Tipo | Unidade | Descrição |
+|---|---|---|---|
+| `Indicador` | String | Nome | Sempre `IPCA` |
+| `Data` | String | `AAAA-MM-DD` | Data da pesquisa |
+| `DataReferencia` | String | `MM/AAAA` | Mês para o qual a expectativa foi informada |
+| `Media`, `Mediana`, `DesvioPadrao`, `Minimo`, `Maximo` | String | % no mês | Estatísticas das expectativas |
+| `numeroRespondentes` | String | Instituições | Quantidade de respondentes |
+| `baseCalculo` | String | Código | Sempre `0` (últimos 30 dias) |
+| `origem_ingestao` | String | Caminho | Arquivo de origem |
+| `data_ingestao` | Timestamp | UTC | Data de gravação no volume |
+| `data_processamento` | Timestamp | UTC | Data de leitura pelo pipeline |
+
+### Regras de qualidade
+
+- `data_valida`;
+- `data_referencia_valida`;
+- `mediana_numerica`;
+- `origem_ingestao_preenchida`.
+
+---
+
+## 4.7 `projeto_hands_on.bronze.bronze_focus_top5`
+
+- **Finalidade:** armazenar as expectativas brutas de IPCA mensal das cinco instituições mais precisas no curto prazo.
+- **Origem:** API de Expectativas do BCB (`ExpectativasMercadoTop5Mensais`, `tipoCalculo = C`), em arquivos NDJSON no volume `bronze.raw_focus`.
+- **Granularidade:** uma linha por data da pesquisa e mês de referência.
+- **Chave lógica:** `Data` + `DataReferencia`.
+- **Tipo de objeto:** streaming table.
+- **Colunas e regras:** iguais às de `bronze_focus_mensal`, com `tipoCalculo` em vez de `baseCalculo` e sem `numeroRespondentes`.
+
+> 328 registros de 2001 a 2010 vêm sem mediana da própria API e são contabilizados pela regra `mediana_numerica`.
 
 ---
 
@@ -385,7 +432,8 @@ A tabela remove duplicidades por `data_ref`. Essa deduplicação trata repetiç�
 - `selic`;
 - `cdi`;
 - `tr`;
-- `ipca`.
+- `ipca`;
+- `focus_ipca`.
 
 ### Colunas
 
@@ -408,6 +456,7 @@ A tabela remove duplicidades por `data_ref`. Essa deduplicação trata repetiç�
 | `selic` | 38 dias |
 | `cdi` | 38 dias |
 | `ipca` | 75 dias |
+| `focus_ipca` | 7 dias |
 
 ### Regras de qualidade
 
@@ -415,6 +464,37 @@ A tabela remove duplicidades por `data_ref`. Essa deduplicação trata repetiç�
 |---|---|---|
 | `chave_unica` | Interromper | `linhas` deve ser igual a `chaves_distintas` |
 | `dados_atualizados` | Registrar | O atraso deve ser menor ou igual ao limite |
+
+---
+
+## 5.7 `projeto_hands_on.silver.focus_ipca`
+
+### Identificação
+
+- **Finalidade:** disponibilizar as expectativas de IPCA do Focus e do Top 5, permitindo consultar o que o mercado esperava em qualquer data passada.
+- **Origem:** `bronze_focus_mensal` e `bronze_focus_top5`.
+- **Granularidade:** uma linha por fonte, data da pesquisa e mês de referência.
+- **Chave:** `fonte` + `data_pesquisa` + `mes_referencia`.
+- **Tipo de objeto:** materialized view.
+- **Consumidores:** notebook de treino do modelo.
+
+### Colunas
+
+| Coluna | Tipo | Unidade | Nulo | Descrição |
+|---|---|---|---|---|
+| `fonte` | String | Código | Não | `focus` ou `top5` |
+| `data_pesquisa` | Date | Data | Não | Data da pesquisa |
+| `mes_referencia` | Date | Mês de referência | Não | Primeiro dia do mês para o qual vale a expectativa |
+| `mediana` | Double | % no mês | Pode ocorrer no Top 5 | Mediana das expectativas |
+| `media` | Double | % no mês | Pode ocorrer no Top 5 | Média das expectativas |
+
+### Regras de qualidade
+
+| Regra | Severidade | Condição |
+|---|---|---|
+| `data_pesquisa_valida` | Interromper | A data da pesquisa deve estar preenchida |
+| `mes_referencia_valido` | Interromper | O mês de referência deve estar preenchido |
+| `faixa_plausivel` | Registrar | Mediana vazia ou entre -5% e 20% no mês |
 
 ---
 
@@ -613,7 +693,7 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 
 ### Identificação
 
-- **Finalidade:** registrar os parâmetros do ARIMA, modelo oficial da previsão, e dos SARIMAX, que acrescentam as variáveis externas juro real e dólar.
+- **Finalidade:** registrar os parâmetros do ARIMA, um dos componentes do modelo oficial, e dos SARIMAX, que acrescentam as variáveis externas juro real e dólar.
 - **Granularidade:** uma linha por modelo e parâmetro.
 - **Chave:** `modelo` + `parametro`.
 - **Origem:** notebook `treino_modelo_ipca.py`, a partir das tabelas Silver de IPCA, Selic e câmbio.
@@ -652,7 +732,7 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 |---|---|---|---|
 | `alvo` | String | Código | `h1` a `h12` ou `acum_12m` |
 | `horizonte` | Long | Meses | Meses entre o mês base e o mês previsto |
-| `modelo` | String | Código | `ultimo_mes`, `media_movel_3m`, `media_movel_6m`, `media_movel_12m`, `sazonal`, `arima`, `sarimax`, `sarimax_ampliado`, `ridge` ou `random_forest` |
+| `modelo` | String | Código | `ultimo_mes`, `media_movel_3m`, `media_movel_6m`, `media_movel_12m`, `sazonal`, `arima`, `sarimax`, `sarimax_ampliado`, `ridge`, `random_forest`, `focus`, `top5`, `media_tres` ou `media_tres_corrigida` |
 | `periodo` | String | Período do mês previsto | `2005 em diante`, `2005-2016`, `2017-2019`, `2020-2021` ou `2022 em diante` |
 | `mae` | Double | p.p. | Erro absoluto médio |
 | `rmse` | Double | p.p. | Raiz do erro quadrático médio |
@@ -684,12 +764,40 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 | `mes_previsto` | Date | Mês | Mês previsto (no `acum_12m`, o último mês da janela de 12 meses) |
 | `periodo` | String | Período | Período de leitura do resultado; vazio no tipo `previsao` |
 | `valor_real` | Double | % | IPCA realizado; vazio no tipo `previsao` |
-| `previsao_oficial` | Double | % | Previsão oficial, do modelo ARIMA |
-| `limite_inferior`, `limite_superior` | Double | % | Faixa de 80% da previsão oficial, a partir dos erros do ARIMA nos testes; preenchida só no tipo `previsao` |
+| `previsao_oficial` | Double | % | Previsão oficial: média de ARIMA, Focus e Top 5, com correção em `h1` |
+| `limite_inferior`, `limite_superior` | Double | % | Faixa de 80% da previsão oficial, a partir dos erros dela nos testes; preenchida só no tipo `previsao` |
 | `previsao_ridge` | Double | % | Previsão da regressão Ridge |
 | `previsao_ultimo_mes`, `previsao_media_movel_3m`, `previsao_media_movel_6m`, `previsao_media_movel_12m`, `previsao_sazonal` | Double | % | Previsões das referências simples |
 | `previsao_arima`, `previsao_sarimax`, `previsao_sarimax_ampliado` | Double | % | Previsões dos modelos de série temporal |
 | `previsao_random_forest` | Double | % | Previsão do Random Forest |
+| `previsao_focus`, `previsao_top5` | Double | % | Expectativas de mercado |
+| `previsao_media_tres`, `previsao_media_tres_corrigida` | Double | % | Média simples de ARIMA, Focus e Top 5, e a mesma média com a correção |
+| `run_id` | String | Identificador | Execução correspondente no MLflow |
+| `treinado_em` | Timestamp | UTC | Momento do treino |
+
+---
+
+## 6.8 `projeto_hands_on.gold.correcao_modelo`
+
+### Identificação
+
+- **Finalidade:** registrar a correção do modelo oficial, ajustada com todo o histórico conhecido.
+- **Granularidade:** uma linha por alvo corrigido (hoje, somente `h1`).
+- **Chave:** `alvo`.
+- **Origem:** notebook `treino_modelo_ipca.py`.
+- **Tipo de objeto:** tabela Delta recriada a cada treino (não faz parte do pipeline).
+
+### Colunas
+
+| Coluna | Tipo | Unidade | Descrição |
+|---|---|---|---|
+| `alvo` | String | Código | Alvo corrigido |
+| `intercepto` | Double | p.p. | Termo constante da correção |
+| `coeficiente_revisao` | Double | p.p. por p.p. | Efeito de cada ponto de revisão do Top 5 em 4 semanas |
+| `alpha` | Double | Adimensional | Força da regularização |
+| `n_treino` | Long | Meses | Meses usados no ajuste |
+| `revisao_atual` | Double | p.p. | Revisão do Top 5 usada na previsão atual |
+| `ajuste_atual` | Double | p.p. | Ajuste somado à média na previsão atual |
 | `run_id` | String | Identificador | Execução correspondente no MLflow |
 | `treinado_em` | Timestamp | UTC | Momento do treino |
 
@@ -702,8 +810,8 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 | Notebook EDA no Databricks | Silver | Exploração, validação e análise técnica |
 | Dashboard EDA no Power BI | Silver | Exploração visual e definição de indicadores |
 | Monitoramento de qualidade | `silver.dq_resumo` | Unicidade, cobertura e atualização |
-| Modelo de previsão do IPCA | `gold.features_mensal` | Machine learning e previsão h1 a h12 |
-| Resultados do modelo e MLflow | `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.parametros_arima`, `gold.coeficientes_modelo` | Previsão atual, comparação de modelos e rastreabilidade dos treinos |
+| Modelo de previsão do IPCA | `gold.features_mensal` e `silver.focus_ipca` | Machine learning e previsão h1 a h12 |
+| Resultados do modelo e MLflow | `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.correcao_modelo`, `gold.parametros_arima`, `gold.coeficientes_modelo` | Previsão atual, comparação de modelos e rastreabilidade dos treinos |
 | Dashboard de negócio | `gold.bi_economia_mensal` planejada | Consumo executivo e indicadores mensais |
 
 ---
@@ -787,6 +895,9 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 | MAE | Erro absoluto médio: em média, quanto a previsão errou, para cima ou para baixo |
 | ARIMA | Modelo de série temporal que prevê o IPCA a partir do próprio histórico |
 | SARIMAX | ARIMA com variáveis externas, como juro real e variação do dólar |
+| Boletim Focus | Pesquisa do Banco Central com as expectativas de mercado |
+| Top 5 | Expectativas das cinco instituições que mais acertam, segundo o ranking do Banco Central |
+| Revisão do Top 5 | Quanto a expectativa do Top 5 para um mês mudou nas últimas 4 semanas |
 
 ---
 
@@ -800,7 +911,7 @@ Média e desvio padrão dos z-scores usam o histórico desde 01/1997 até o pró
 - A tabela `gold.features_mensal` tem finalidade preditiva e não deve ser usada como substituta direta de uma Gold orientada ao BI.
 - O dashboard exploratório consome Silver para preservar flexibilidade analítica.
 - O dashboard executivo deverá consumir tabelas Gold após validação das regras de negócio.
-- As tabelas de resultados do modelo (seções 6.4 a 6.7) são recriadas a cada treino e não passam pelas regras de qualidade do pipeline.
+- As tabelas de resultados do modelo (seções 6.4 a 6.8) são recriadas a cada treino e não passam pelas regras de qualidade do pipeline.
 - Os resultados não constituem recomendação financeira.
 
 ---
@@ -824,3 +935,4 @@ Este documento deve ser revisado quando ocorrer qualquer uma das situações aba
 | 1.0 | 02/11/2026 | Criação inicial com Bronze, Silver, Gold existente e Gold BI planejada |
 | 1.1 | 02/11/2026 | Inclusão do catálogo na documentação versionada do projeto, referência prevista no README e validação automatizada no CI. |
 | 1.2 | 03/11/2026 | `gold.features_mensal` a partir de 01/2001 com validação ano a ano; inclusão das tabelas de resultados do modelo (6.4 a 6.7), com o ARIMA como modelo oficial, de termos no glossário e de teste no CI que verifica se todas as tabelas estão no catálogo. |
+| 1.3 | 04/11/2026 | Inclusão do Boletim Focus e do Top 5 (seções 4.6, 4.7 e 5.7) e da correção do modelo (6.8); `previsao_oficial` passa a ser a média de ARIMA, Focus e Top 5, com correção em `h1`. |

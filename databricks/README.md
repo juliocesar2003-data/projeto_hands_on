@@ -5,7 +5,7 @@ Pipeline de dados em camadas (bronze / silver / gold) no Databricks que ingere c
 ## Arquitetura
 
 ```
-BACEN API (9 séries SGS)
+BACEN API (9 séries SGS + Boletim Focus)
       │
       ▼
 Carga histórica (one-off) ──── Job sob demanda (serverless)
@@ -13,9 +13,10 @@ Carga histórica (one-off) ──── Job sob demanda (serverless)
       │
 Ingestão diária ──────────────── Job agendado diário (serverless)
    ingestao_diaria_bacen.py: da última data gravada até hoje
+   ingestao_focus.py: API de Expectativas do BCB (Focus e Top 5), da última pesquisa gravada até hoje
       │
       ▼
-UC Volume: projeto_hands_on.bronze.raw (arquivos NDJSON por série)
+UC Volumes: projeto_hands_on.bronze.raw (NDJSON por série) e bronze.raw_focus (NDJSON do Focus)
       │
       ▼
 Spark Declarative Pipeline (serverless)
@@ -23,6 +24,7 @@ Spark Declarative Pipeline (serverless)
       ├─ Bronze: streaming tables via Auto Loader (com origem e data de ingestão)
       │    bronze_moedas (5 fluxos append, um por moeda)
       │    bronze_selic, bronze_cdi, bronze_tr, bronze_ipca
+      │    bronze_focus_mensal, bronze_focus_top5
       │
       ├─ Silver: materialized views
       │    silver.moedas_conversao — moedas tipadas com códigos ISO
@@ -30,6 +32,7 @@ Spark Declarative Pipeline (serverless)
       │    silver.cdi — mensal (média anualizada % a.a. + acumulado no mês)
       │    silver.tr — diário com data_ref + data_fim
       │    silver.ipca — variação percentual mensal
+      │    silver.focus_ipca — expectativas de IPCA por fonte, data da pesquisa e mês de referência
       │    silver.dq_resumo — resumo de qualidade (unicidade e atualização)
       │
       └─ Gold: materialized views
@@ -38,10 +41,11 @@ Spark Declarative Pipeline (serverless)
                  │
                  ▼
 Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento previsao_ipca)
-   gold.parametros_arima — parâmetros do ARIMA (modelo oficial) e dos SARIMAX, com erro padrão e p-valor
+   gold.correcao_modelo — correção do modelo oficial pela revisão do Top 5
+   gold.parametros_arima — parâmetros do ARIMA e dos SARIMAX, com erro padrão e p-valor
    gold.coeficientes_modelo — coeficientes do Ridge por horizonte (comparação)
    gold.metricas_modelo — erro por horizonte, modelo e período (validação ano a ano)
-   gold.previsoes_ipca — previsão dos próximos 12 meses de cada modelo + previsto × realizado
+   gold.previsoes_ipca — previsão oficial dos próximos 12 meses, com faixa de 80%, previsão de cada modelo e previsto × realizado
 ```
 
 ## Conteúdo
@@ -50,16 +54,19 @@ Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento pr
 notebooks/
 ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)
 ├── ingestao_diaria_bacen.py     # Ingestão diária incremental (somente registros novos)
+├── ingestao_focus.py            # Ingestão incremental do Boletim Focus e do Top 5
 ├── eda_bacen.py                 # Análise exploratória sobre as tabelas silver (ver README principal)
 ├── treino_modelo_ipca.py        # Treino e previsão do IPCA (ver README principal)
 └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
 transformations/
 ├── bronze/
 │   ├── bronze_moedas.py         # Streaming table de câmbio (5 fluxos append)
-│   └── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
+│   ├── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
+│   └── bronze_focus.py          # Streaming tables do Boletim Focus e do Top 5
 ├── silver/
 │   ├── silver_moedas_conversao.py  # Cotações de moedas tipadas
 │   ├── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
+│   ├── silver_focus.py             # Expectativas de IPCA do Focus e do Top 5
 │   └── silver_qualidade.py         # Resumo de qualidade (dq_resumo)
 └── gold/
     └── gold_features.py            # Metas de inflação e base do modelo (features_mensal)
@@ -87,10 +94,11 @@ Job para rodar sem acompanhamento, com a seguinte configuração:
 | Configuração | Valor |
 |---|---|
 | Tarefa 1 — `ingestao_diaria` | Notebook `notebooks/ingestao_diaria_bacen.py`, compute serverless |
-| Tarefa 2 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente da tarefa 1 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
-| Tarefa 3 — `treino_modelo` | Notebook `notebooks/treino_modelo_ipca.py`, compute serverless, depois da atualização do pipeline: retreina o modelo e atualiza as previsões |
+| Tarefa 2 — `ingestao_focus` | Notebook `notebooks/ingestao_focus.py`, compute serverless |
+| Tarefa 3 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente das tarefas 1 e 2 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
+| Tarefa 4 — `treino_modelo` | Notebook `notebooks/treino_modelo_ipca.py`, compute serverless, depois da atualização do pipeline: retreina o modelo e atualiza as previsões |
 | Agendamento | Diário às 21:00, fuso `America/Sao_Paulo` (após a publicação da PTAX e dos indicadores do dia) |
-| Retentativas | 2 retentativas na tarefa 1, com intervalo de 10 minutos |
+| Retentativas | 2 retentativas nas tarefas 1 e 2, com intervalo de 10 minutos |
 | Notificações | E-mail em caso de falha (para o usuário dono do token usado no deploy) |
 | Execuções simultâneas | No máximo 1 |
 

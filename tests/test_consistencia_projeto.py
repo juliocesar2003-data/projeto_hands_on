@@ -72,8 +72,8 @@ def test_bundle_aponta_para_arquivos_existentes():
 
     diaria = jobs["ingestao_diaria_bacen"]
     assert diaria["schedule"]["timezone_id"] == "America/Sao_Paulo"
-    assert [t["task_key"] for t in diaria["tasks"]] == ["ingestao_diaria", "atualiza_pipeline", "treino_modelo"]
-    assert diaria["tasks"][1]["pipeline_task"]["pipeline_id"] == "${resources.pipelines.pipeline_bacen.id}"
+    assert [t["task_key"] for t in diaria["tasks"]] == ["ingestao_diaria", "ingestao_focus", "atualiza_pipeline", "treino_modelo"]
+    assert diaria["tasks"][2]["pipeline_task"]["pipeline_id"] == "${resources.pipelines.pipeline_bacen.id}"
 
 
 def test_eda_le_somente_tabelas_silver_do_pipeline():
