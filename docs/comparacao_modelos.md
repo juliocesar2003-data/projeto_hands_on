@@ -3,68 +3,69 @@
 ## Como os modelos foram testados
 
 - **Objetivo:** prever o IPCA de cada um dos próximos 12 meses e o acumulado em 12 meses.
-- **Validação ano a ano (2005 a 2026):** cada ano foi previsto por modelos treinados só com dados até o fim do ano anterior, como funcionaria na prática. São cerca de 250 previsões por horizonte.
-- **Métrica:** erro absoluto médio (MAE), em pontos percentuais. Quanto menor, melhor.
+- **Validação ano a ano (2005 a 2026):** cada ano foi previsto por modelos treinados só com dados até o fim do ano anterior. São cerca de 250 previsões por horizonte.
+- **Sem olhar para o futuro:** cada previsão usa só as pesquisas Focus publicadas até o dia 5 do mês seguinte ao mês base.
+- **Métricas:** erro absoluto médio (MAE), em pontos percentuais, e R², que mede quanto o modelo explica além da média do período.
 
 ## Resultado
 
-Erro médio de h1 a h12 (p.p.), por período do mês previsto. Em negrito, o melhor de cada coluna.
+Erro médio de h1 a h3 e R² por horizonte. Entre parênteses, a diferença para o ARIMA.
 
-| Modelo | O que faz | 2005–2026 | 2005–2016 | 2017–2019 | 2020–2021 | 2022 em diante |
+| Modelo | Erro médio h1–h3 | R² h1 | R² h2 | R² h3 | R² h12 |
+|---|---|---|---|---|---|
+| **Média corrigida (modelo oficial)** | **0,193** (−0,036) | 0,64 (+0,34) | 0,28 (+0,16) | **0,18** (+0,14) | 0,09 (+0,09) |
+| Média simples de ARIMA, Focus e Top 5 | 0,196 (−0,032) | 0,57 (+0,28) | 0,28 (+0,16) | **0,18** (+0,14) | 0,09 (+0,09) |
+| Mercado: Top 5 | 0,195 (−0,033) | 0,61 (+0,32) | 0,24 (+0,12) | 0,16 (+0,12) | 0,05 (+0,05) |
+| Mercado: Focus | 0,199 (−0,029) | 0,55 (+0,26) | 0,22 (+0,11) | 0,15 (+0,11) | 0,04 (+0,04) |
+| **ARIMA** | 0,228 | 0,29 | 0,12 | 0,03 | 0,01 |
+| Regressão múltipla (último IPCA + sazonal) | 0,239 (+0,011) | 0,27 (−0,02) | 0,10 (−0,02) | −0,01 (−0,05) | −0,17 (−0,18) |
+| Ridge (8 variáveis) | 0,243 (+0,015) | 0,23 (−0,06) | 0,03 (−0,09) | −0,07 (−0,11) | −0,19 (−0,20) |
+| Média móvel 12 meses | 0,244 (+0,016) | 0,05 (−0,24) | −0,02 (−0,14) | −0,07 (−0,10) | −0,37 (−0,37) |
+| SARIMAX (juro real + dólar) | 0,252 (+0,024) | 0,21 (−0,08) | −0,04 (−0,15) | −0,22 (−0,25) | −0,31 (−0,32) |
+| Média sazonal | 0,260 (+0,031) | 0,02 (−0,27) | 0,02 (−0,10) | 0,02 (−0,02) | 0,02 (+0,02) |
+| Random Forest | 0,263 (+0,035) | 0,12 (−0,17) | −0,21 (−0,33) | −0,25 (−0,29) | −0,86 (−0,86) |
+| Último mês | 0,283 (+0,055) | 0,07 (−0,22) | −0,31 (−0,42) | −0,64 (−0,67) | −0,48 (−0,48) |
+| Mesmo mês do ano anterior | 0,300 (+0,072) | −0,51 (−0,80) | −0,51 (−0,62) | −0,51 (−0,54) | −0,48 (−0,48) |
+
+No IPCA acumulado em 12 meses, o MAE é 1,45 p.p. no modelo oficial, 1,51 no Top 5, 1,52 no Focus e 1,74 no ARIMA.
+
+## Modelo oficial
+
+```
+Previsão base = (ARIMA + Focus + Top 5) ÷ 3
+h1:        previsão base + intercepto + coeficiente × revisão do Top 5 em 4 semanas
+h2 a h12:  previsão base
+```
+
+- **ARIMA:** SARIMA(1,0,0)(1,0,0,12), em que o IPCA de um mês depende do mês anterior e do mesmo mês do ano anterior.
+- **Focus e Top 5:** expectativas de mercado publicadas pelo Banco Central. Trazem informação que não está no histórico do IPCA, como reajustes anunciados.
+- **Correção:** o mercado costuma reagir devagar às notícias, então a revisão recente ajuda a prever o erro da média. O ajuste é aprendido só com anos anteriores.
+- **Só em h1:** foi o único horizonte em que a correção reduziu o erro em 2005–2016, resultado confirmado em 2017 em diante.
+
+## Métricas de teste do modelo oficial
+
+| Horizonte | Previsões | MAE (p.p.) | RMSE (p.p.) | Viés (p.p.) | R² | Redução do MAE sobre o ARIMA |
 |---|---|---|---|---|---|---|
-| **ARIMA** | Combina o mês anterior e o mesmo mês do ano anterior, com pesos estimados | **0,247** | **0,202** | 0,295 | **0,368** | **0,274** |
-| Média sazonal | Média histórica do mês do calendário | 0,260 | 0,212 | 0,317 | 0,418 | **0,274** |
-| Média móvel 12 meses | Média do último ano | 0,267 | 0,221 | 0,281 | 0,400 | 0,312 |
-| Ridge | Regressão com IPCA, Selic, dólar e meta | 0,276 | 0,244 | 0,300 | 0,409 | 0,285 |
-| Média móvel 6 meses | Média do último semestre | 0,279 | 0,239 | **0,259** | 0,385 | 0,340 |
-| SARIMAX | ARIMA com juro real e dólar | 0,292 | 0,276 | 0,261 | 0,415 | 0,301 |
-| Média móvel 3 meses | Média do último trimestre | 0,297 | 0,257 | 0,262 | 0,403 | 0,373 |
-| Mesmo mês do ano anterior | Repete o IPCA do mesmo mês, um ano antes | 0,299 | 0,226 | 0,366 | 0,473 | 0,362 |
-| Random Forest | Árvores de decisão com 24 variáveis | 0,315 | 0,266 | 0,315 | 0,369 | 0,410 |
-| Último mês | Repete o IPCA mais recente | 0,322 | 0,273 | 0,297 | 0,433 | 0,411 |
+| Mês seguinte (h1) | 260 | 0,151 | 0,201 | −0,001 | 0,64 | 26,7% |
+| 2 meses à frente (h2) | 259 | 0,206 | 0,283 | +0,021 | 0,28 | 12,1% |
+| 3 meses à frente (h3) | 258 | 0,220 | 0,302 | +0,019 | 0,18 | 9,6% |
 
-No IPCA acumulado em 12 meses, a ordem se mantém: ARIMA 1,74 p.p., média sazonal 1,95, último mês 2,01, Ridge 2,41, SARIMAX 2,54 e Random Forest 3,22.
+## Limites
 
-## Modelo escolhido: ARIMA
-
-O ARIMA escolhido é o SARIMA(1,0,0)(1,0,0,12): o IPCA de um mês depende do mês anterior (peso 0,60) e do mesmo mês do ano anterior (peso 0,20). Ele foi escolhido porque:
-
-- **tem o menor erro no período todo** e em três dos quatro períodos, em todos os horizontes;
-- **junta as duas regras simples:** a inércia do último mês e a sazonalidade do mesmo mês do ano anterior, com pesos estimados nos dados. Por isso erra menos que cada uma delas sozinha;
-- **é simples e estável:** tem três parâmetros, todos significativos, e usa só o histórico do IPCA.
-
-## Métricas de teste do ARIMA
-
-| Horizonte | Previsões | MAE (p.p.) | RMSE (p.p.) | Viés (p.p.) | R² | Redução do MAE sobre "último mês" |
-|---|---|---|---|---|---|---|
-| Mês seguinte (h1) | 260 | 0,206 | 0,280 | −0,021 | 0,29 | 12,3% |
-| 2 meses à frente (h2) | 259 | 0,235 | 0,313 | −0,037 | 0,12 | 19,1% |
-| 3 meses à frente (h3) | 258 | 0,244 | 0,327 | −0,047 | 0,03 | 25,2% |
-
-- **MAE:** erro médio, para cima ou para baixo.
-- **RMSE:** como o MAE, mas pune mais os erros grandes.
-- **Viés:** real menos previsto. Negativo indica previsão, em média, acima do realizado.
-- **R²:** quanto o modelo explica além da média do período de teste. A capacidade de explicação cai rápido: 0,29 no mês seguinte e quase zero em 3 meses.
+- **Em relação ao mercado, é um empate:** o modelo oficial tem números melhores no período todo, mas as diferenças não são estatisticamente significativas. De 2022 em diante, o mercado vai melhor em h1 (R² de 0,62 no Focus e 0,60 no Top 5, contra 0,56).
+- **Em relação ao ARIMA, o ganho é claro,** exceto na pandemia (2020–2021), quando o ARIMA erra menos.
+- **O R² cai rápido com a distância:** parte da inflação é choque imprevisível.
+- **Previsão de h1 é quase do mês corrente:** a pesquisa usada já é do início do mês previsto.
 
 ## Por que não os outros
 
-- **Médias móveis:** as curtas (3 e 6 meses) foram as melhores em 2017–2019, quando a inflação caiu, porque se adaptam rápido. Nos outros períodos erram mais.
-- **Mesmo mês do ano anterior:** funciona em anos estáveis, mas falha quando a inflação muda de patamar. Em 2017–2019 repetia os meses de inflação alta de 2015–2016.
-- **Ridge:** precisa de muitos anos de treino e ficou em 4º lugar. O coeficiente dos juros saiu com o sinal contrário ao esperado.
-- **SARIMAX (com Selic e dólar):** piorou a previsão no geral. O efeito do dólar tem o sinal esperado; o dos juros não é mensurável com esses dados, porque o Banco Central sobe a Selic quando a inflação sobe.
-- **Random Forest:** com cerca de 300 meses de dados, decora o passado e não projeta valores fora do que já viu.
-
-## Previsão atual (mês base: setembro/2026)
-
-| Mês previsto | ARIMA | Faixa de 80% |
-|---|---|---|
-| Outubro/2026 | 0,61% | 0,25% a 0,92% |
-| Acumulado de outubro/2026 a setembro/2027 | 6,27% | 3,09% a 8,61% |
+- **Regressões e Random Forest:** usam a mesma informação do ARIMA, com mais parâmetros, e erram mais.
+- **SARIMAX:** piorou a previsão no geral, e o efeito dos juros não é mensurável com esses dados, porque o Banco Central sobe a Selic quando a inflação sobe.
+- **Médias móveis e mesmo mês do ano anterior:** funcionam em alguns períodos, mas falham quando a inflação muda de patamar.
+- **Pesos ajustados entre ARIMA, Focus e Top 5:** não trouxeram ganho claro. Mesmo os melhores pesos possíveis param perto da média simples.
 
 ## Onde conferir
 
 - Notebook `databricks/notebooks/treino_modelo_ipca.py` e experimento `previsao_ipca` no MLflow.
-- Tabelas `gold.metricas_modelo` (erros) e `gold.previsoes_ipca` (previsão oficial e previsto × realizado).
-- O "mesmo mês do ano anterior" foi calculado sobre as mesmas previsões de teste, a partir de `silver.ipca`.
-
-Números da validação de 03/11/2026. Os valores mudam a cada novo IPCA divulgado.
+- Tabelas `gold.metricas_modelo` (erros), `gold.previsoes_ipca` (previsão oficial e previsto × realizado) e `gold.correcao_modelo`.
+- As regressões simples e o "mesmo mês do ano anterior" foram calculados à parte, com os mesmos meses de teste.

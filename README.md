@@ -9,7 +9,7 @@ A documentação das tabelas, colunas, regras de negócio, qualidade e linhagem 
 ## Arquitetura
 
 ```
-BACEN API (9 séries SGS)
+BACEN API (9 séries SGS + Boletim Focus)
       │
       ▼
 Carga histórica (one-off) ──── Job sob demanda (serverless)
@@ -17,9 +17,10 @@ Carga histórica (one-off) ──── Job sob demanda (serverless)
       │
 Ingestão diária ──────────────── Job agendado diário (serverless)
    ingestao_diaria_bacen.py: da última data gravada até hoje
+   ingestao_focus.py: API de Expectativas do BCB (Focus e Top 5), da última pesquisa gravada até hoje
       │
       ▼
-UC Volume: projeto_hands_on.bronze.raw (arquivos NDJSON por série)
+UC Volumes: projeto_hands_on.bronze.raw (NDJSON por série) e bronze.raw_focus (NDJSON do Focus)
       │
       ▼
 Spark Declarative Pipeline (serverless)
@@ -27,6 +28,7 @@ Spark Declarative Pipeline (serverless)
       ├─ Bronze: streaming tables via Auto Loader (com origem e data de ingestão)
       │    bronze_moedas (5 fluxos append, um por moeda)
       │    bronze_selic, bronze_cdi, bronze_tr, bronze_ipca
+      │    bronze_focus_mensal, bronze_focus_top5
       │
       ├─ Silver: materialized views
       │    silver.moedas_conversao — moedas tipadas com códigos ISO
@@ -34,6 +36,7 @@ Spark Declarative Pipeline (serverless)
       │    silver.cdi — mensal (média anualizada % a.a. + acumulado no mês)
       │    silver.tr — diário com data_ref + data_fim
       │    silver.ipca — variação percentual mensal
+      │    silver.focus_ipca — expectativas de IPCA por fonte, data da pesquisa e mês de referência
       │    silver.dq_resumo — resumo de qualidade (unicidade e atualização)
       │
       └─ Gold: materialized views
@@ -42,10 +45,11 @@ Spark Declarative Pipeline (serverless)
                  │
                  ▼
 Treino do modelo (notebook, tarefa do Job diário) ── MLflow (experimento previsao_ipca)
-   gold.parametros_arima — parâmetros do ARIMA (modelo oficial) e dos SARIMAX, com erro padrão e p-valor
+   gold.correcao_modelo — correção do modelo oficial pela revisão do Top 5
+   gold.parametros_arima — parâmetros do ARIMA e dos SARIMAX, com erro padrão e p-valor
    gold.coeficientes_modelo — coeficientes do Ridge por horizonte (comparação)
    gold.metricas_modelo — erro por horizonte, modelo e período (validação ano a ano)
-   gold.previsoes_ipca — previsão dos próximos 12 meses de cada modelo + previsto × realizado
+   gold.previsoes_ipca — previsão oficial dos próximos 12 meses, com faixa de 80%, previsão de cada modelo e previsto × realizado
 ```
 
 ## Estrutura do repositório
@@ -60,23 +64,26 @@ requirements-dev.txt                 # Dependências de desenvolvimento (CI e te
 tests/                               # Testes unitários (rodam sem Databricks)
 docs/                                # Documentação e materiais de apresentação (não executáveis)
 ├── catalogo_dados.md                # Catálogo e dicionário de dados (tabelas, colunas, regras e linhagem)
-├── comparacao_modelos.md            # Resumo da comparação dos modelos de previsão do IPCA e da escolha do ARIMA
+├── comparacao_modelos.md            # Resumo da comparação dos modelos de previsão do IPCA e do modelo oficial
 ├── dashboard_bacen.pbix             # Dashboard exploratório no Power BI (câmbio, juros, inflação e qualidade)
 └── EDA Bacen_2026_View.pdf          # Exportação em PDF do dashboard do Power BI
 databricks/
 ├── notebooks/
 │   ├── ingestao_bacen.py            # Carga histórica one-off (BACEN API → NDJSON no UC Volume)
 │   ├── ingestao_diaria_bacen.py     # Ingestão diária incremental (somente registros novos)
+│   ├── ingestao_focus.py            # Ingestão incremental do Boletim Focus e do Top 5
 │   ├── eda_bacen.py                 # Análise exploratória sobre as tabelas silver
 │   ├── treino_modelo_ipca.py        # Treino e previsão do IPCA (MLflow → tabelas gold do modelo)
 │   └── bacen_series_explorer.py     # Notebook exploratório (últimos 10 registros por série SGS)
 └── transformations/
     ├── bronze/
     │   ├── bronze_moedas.py         # Streaming table de câmbio (5 fluxos append)
-    │   └── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
+    │   ├── bronze_indicadores.py    # Streaming tables Selic/CDI/TR/IPCA
+    │   └── bronze_focus.py          # Streaming tables do Boletim Focus e do Top 5
     ├── silver/
     │   ├── silver_moedas_conversao.py  # Cotações de moedas tipadas
     │   ├── silver_indicadores.py       # Indicadores mensais (Selic, CDI), diários (TR), mensais (IPCA)
+    │   ├── silver_focus.py             # Expectativas de IPCA do Focus e do Top 5
     │   └── silver_qualidade.py         # Resumo de qualidade (dq_resumo)
     └── gold/
         └── gold_features.py            # Metas de inflação e base do modelo (features_mensal)
@@ -102,6 +109,8 @@ databricks/
 | CDI | 12 | Diária (agrupada mensal) |
 | TR | 226 | Diária |
 | IPCA % | 433 | Mensal |
+
+Além das séries SGS, o projeto consome a [API de Expectativas](https://dadosabertos.bcb.gov.br/dataset/expectativas-mercado) do Banco Central: `ExpectativaMercadoMensais` (Focus, `baseCalculo = 0`) e `ExpectativasMercadoTop5Mensais` (Top 5 de curto prazo, `tipoCalculo = C`), ambas filtradas para o IPCA.
 
 ### Regras de agregação mensal (silver)
 
@@ -140,6 +149,9 @@ As regras de qualidade são *expectations* do Spark Declarative Pipeline: rodam 
 | `silver.cdi` | `taxas_nao_negativas`, `dias_uteis_no_mes` (1 a 23) | Registrar |
 | `silver.tr` | `taxa_nao_negativa`, `periodo_valido` | Registrar |
 | `silver.ipca` | `faixa_plausivel` (−5% a 100% no mês) | Registrar |
+| `bronze_focus_mensal` / `bronze_focus_top5` | `data_valida`, `data_referencia_valida`, `mediana_numerica`, `origem_ingestao_preenchida` | Registrar |
+| `silver.focus_ipca` | `data_pesquisa_valida`, `mes_referencia_valido` | Interromper |
+| `silver.focus_ipca` | `faixa_plausivel` (−5% a 20% no mês, ou mediana vazia) | Registrar |
 | `silver.dq_resumo` | `chave_unica` (sem chaves duplicadas) | Interromper |
 | `silver.dq_resumo` | `dados_atualizados` (atraso dentro do limite) | Registrar |
 | `gold.metas_inflacao` | `ano_valido`, `meta_positiva` | Interromper |
@@ -164,8 +176,8 @@ A regra de qualidade `origem_ingestao_preenchida` (nível registrar) verifica qu
 
 Tabela com uma linha por tabela silver, recalculada a cada atualização: `linhas`, `chaves_distintas`, `ultima_data`, `dias_desde_ultima_data`, `limite_atraso_dias` e `verificado_em`. Cobre o que as regras por registro não conseguem verificar:
 
-- **Unicidade da chave** (como os meses duplicados do IPCA): chave `data_ref` nas tabelas mensais, `moeda` + `data_cotacao` no câmbio e `data_ref` + `data_fim` na TR.
-- **Atualização dos dados:** até 7 dias para as séries diárias (feriados prolongados chegam a 5 dias sem cotação), 38 dias para Selic e CDI (datadas no dia 1 do mês) e 75 dias para o IPCA (publicado por volta do dia 10 do mês seguinte).
+- **Unicidade da chave** (como os meses duplicados do IPCA): chave `data_ref` nas tabelas mensais, `moeda` + `data_cotacao` no câmbio, `data_ref` + `data_fim` na TR e `fonte` + `data_pesquisa` + `mes_referencia` no Focus.
+- **Atualização dos dados:** até 7 dias para as séries diárias (feriados prolongados chegam a 5 dias sem cotação), 38 dias para Selic e CDI (datadas no dia 1 do mês), 75 dias para o IPCA (publicado por volta do dia 10 do mês seguinte) e 7 dias para o Focus.
 
 Os testes do CI garantem que toda tabela silver e gold tenha regras de qualidade e esteja coberta pelo `dq_resumo`.
 
@@ -235,7 +247,7 @@ Tabela de referência com a meta do CMN por ano (`ano`, `meta`, `tolerancia_pp`,
 
 ## Modelo de previsão do IPCA
 
-O notebook `databricks/notebooks/treino_modelo_ipca.py` treina **um modelo por horizonte** (estratégia direta): o IPCA de cada um dos próximos 12 meses (`h1` a `h12`) e o IPCA acumulado em 12 meses (`acum_12m`), a partir de `gold.features_mensal`. Ele roda como última tarefa do Job diário. Como a validação completa leva de 6 a 12 minutos e só muda quando sai um IPCA novo, o notebook termina logo no início nos dias sem IPCA novo e mantém as tabelas do último treino. Para retreinar sem IPCA novo (por exemplo, depois de mudar o código do modelo), rode o notebook com o parâmetro `forcar_treino = sim`.
+O notebook `databricks/notebooks/treino_modelo_ipca.py` treina **um modelo por horizonte** (estratégia direta): o IPCA de cada um dos próximos 12 meses (`h1` a `h12`) e o IPCA acumulado em 12 meses (`acum_12m`), a partir de `gold.features_mensal` e das expectativas de mercado em `silver.focus_ipca`. Ele roda como última tarefa do Job diário. Como a validação completa leva de 6 a 12 minutos e só muda quando sai um IPCA novo, o notebook termina logo no início nos dias sem IPCA novo e mantém as tabelas do último treino. Para retreinar sem IPCA novo (por exemplo, depois de mudar o código do modelo), rode o notebook com o parâmetro `forcar_treino = sim`.
 
 ### Modelos comparados
 
@@ -244,11 +256,30 @@ O notebook `databricks/notebooks/treino_modelo_ipca.py` treina **um modelo por h
 | `ultimo_mes` | Referência | Repete o IPCA do mês base (ou o acumulado em 12 meses) |
 | `media_movel_3m`, `media_movel_6m`, `media_movel_12m` | Referência | Média do IPCA dos últimos 3, 6 ou 12 meses, repetida para os meses seguintes |
 | `sazonal` | Referência | Média histórica do mês do calendário previsto |
-| `arima` | Série temporal | **Modelo oficial.** SARIMA ajustado só no histórico do IPCA desde 1997. A ordem é escolhida por AIC entre 36 combinações, com os dados anteriores a 2005; a escolhida foi (1,0,0)(1,0,0,12): o mês anterior e o mesmo mês do ano anterior |
+| `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA desde 1997. A ordem é escolhida por AIC entre 36 combinações, com os dados anteriores a 2005; a escolhida foi (1,0,0)(1,0,0,12): o mês anterior e o mesmo mês do ano anterior |
 | `sarimax` | Série temporal | O mesmo SARIMA com variáveis externas do mês anterior: `juro_real_12m` e `usd_var_12m`. Nas previsões, elas ficam constantes no último valor conhecido, como num cenário do simulador |
 | `sarimax_ampliado` | Série temporal | O SARIMAX com também `selic_var_12m_pp` e `usd_var_3m` |
 | `ridge` | Regressão | Regressão linear com regularização, com features calculáveis a partir dos parâmetros do simulador: `ipca_lag1`, `ipca_acum_3m`, `ipca_12m_menos_meta`, `ipca_sazonal`, `juro_real_12m`, `selic_var_12m_pp`, `usd_var_3m` e `usd_var_12m`. Os coeficientes vão para `gold.coeficientes_modelo` |
 | `random_forest` | Regressão | Comparação não linear, com todas as features (inclusive as comparações em z-score) |
+| `focus`, `top5` | Mercado | Mediana das expectativas do Boletim Focus e do ranking Top 5 de curto prazo |
+| `media_tres` | Combinação | Média simples de ARIMA, Focus e Top 5 |
+| `media_tres_corrigida` | Combinação | **Modelo oficial.** A média simples, com correção em `h1` pela revisão do Top 5 |
+
+### Modelo oficial: média de ARIMA, Focus e Top 5, com correção em 1 mês
+
+```
+Previsão base = (ARIMA + Focus + Top 5) ÷ 3
+h1:           previsão base + intercepto + coeficiente × revisão do Top 5 em 4 semanas
+h2 a h12:     previsão base
+Acumulado:    média do acumulado do ARIMA, do Focus e do Top 5
+```
+
+- **Focus e Top 5** são medianas de expectativas de mercado publicadas pelo Banco Central. O Top 5 reúne as cinco instituições que mais acertam no curto prazo. Os dois trazem informação que não está no histórico do IPCA.
+- **Correção:** as expectativas costumam reagir devagar às notícias, então a revisão recente ajuda a prever o erro da média. O coeficiente sai de uma regressão Ridge (`alpha` fixo em 50), refeita a cada ano só com meses anteriores, e fica em `gold.correcao_modelo`.
+- **Sem olhar para o futuro:** cada previsão de teste usa só as pesquisas publicadas até o dia 5 do mês seguinte ao mês base. A previsão atual usa a pesquisa mais recente disponível no dia do treino.
+- **Regra da correção:** `h1` foi o único horizonte em que a correção reduziu o erro em 2005–2016 para esta média. O resultado foi confirmado depois em 2017 em diante.
+
+A constante `MODELO_OFICIAL` do notebook define essa escolha, e os demais modelos continuam sendo treinados e gravados para comparação.
 
 ### Validação ano a ano (origem móvel)
 
@@ -269,42 +300,49 @@ MAE médio de h1 a h12 (p.p.; menor é melhor):
 
 | Modelo | 2005 em diante | 2005–2016 | 2017–2019 | 2020–2021 | 2022 em diante |
 |---|---|---|---|---|---|
-| ARIMA | **0,247** | **0,202** | 0,295 | **0,368** | **0,274** |
-| Sazonal | 0,260 | 0,212 | 0,317 | 0,418 | **0,274** |
+| **Média corrigida (oficial)** | **0,223** | **0,176** | 0,242 | 0,404 | 0,248 |
+| Média simples de ARIMA, Focus e Top 5 | 0,224 | 0,177 | 0,244 | 0,409 | **0,247** |
+| Focus | 0,226 | 0,178 | **0,229** | 0,447 | **0,247** |
+| Top 5 | 0,226 | 0,178 | **0,229** | 0,438 | 0,249 |
+| ARIMA | 0,247 | 0,202 | 0,295 | **0,368** | 0,274 |
+| Sazonal | 0,260 | 0,212 | 0,317 | 0,418 | 0,274 |
 | Média móvel 12m | 0,267 | 0,221 | 0,281 | 0,400 | 0,312 |
 | Ridge | 0,276 | 0,244 | 0,300 | 0,409 | 0,285 |
-| Média móvel 6m | 0,279 | 0,239 | **0,259** | 0,385 | 0,340 |
+| Média móvel 6m | 0,279 | 0,239 | 0,259 | 0,385 | 0,340 |
 | SARIMAX | 0,292 | 0,276 | 0,261 | 0,415 | 0,301 |
 | SARIMAX ampliado | 0,293 | 0,273 | 0,263 | 0,409 | 0,310 |
 | Média móvel 3m | 0,297 | 0,257 | 0,262 | 0,403 | 0,373 |
 | Random Forest | 0,315 | 0,266 | 0,315 | 0,369 | 0,410 |
 | Último mês | 0,322 | 0,273 | 0,297 | 0,433 | 0,411 |
 
-IPCA acumulado em 12 meses (MAE em p.p.): ARIMA 1,735; sazonal 1,946; último mês 2,014; Ridge 2,405; SARIMAX 2,538; SARIMAX ampliado 2,573; Random Forest 3,223.
+R² do modelo oficial contra o ARIMA: 0,64 contra 0,29 em `h1`, 0,28 contra 0,12 em `h2`, 0,18 contra 0,03 em `h3` e 0,09 contra 0,01 em `h12`.
 
-- **O ARIMA tem o menor erro em todos os horizontes** e em quase todos os períodos. Ele acerta mais que o Ridge em cerca de 60% dos meses testados em cada período.
+IPCA acumulado em 12 meses (MAE em p.p.): modelo oficial 1,452; Top 5 1,513; Focus 1,521; ARIMA 1,735; sazonal 1,946; último mês 2,014; Ridge 2,405; SARIMAX 2,538; SARIMAX ampliado 2,573; Random Forest 3,223.
+
+- **O modelo oficial supera o ARIMA de forma significativa** de `h1` a `h6` e fica no nível do mercado: as diferenças para o Focus e o Top 5 não são estatisticamente significativas. Na pandemia, o ARIMA ainda erra menos.
+- **Só com os dados do projeto, o ARIMA é o melhor,** em todos os horizontes e em quase todos os períodos. Ele acerta mais que o Ridge em cerca de 60% dos meses testados em cada período.
 - **O Ridge depende de muitos dados de treino.** A diferença para o ARIMA é grande entre 2005 e 2008, quando o treino tinha de 36 a 80 meses, e fica pequena a partir de 2014. A primeira validação (treino 2006–2019, teste 2020 em diante) mostrava o Ridge na frente; com 22 anos de teste, esse resultado não se mantém.
 - **Em 2017–2019, todos os modelos previram inflação acima da realizada** (viés de −0,15 a −0,21 p.p. por mês): a inflação caiu para mínimas históricas, e as médias móveis curtas, que se adaptam mais rápido, foram as melhores.
 - **Na pandemia, todos subestimaram a inflação** e tiveram os maiores erros.
 - **O SARIMAX não melhorou o ARIMA.** Com juro real e dólar como variáveis externas, o erro médio subiu de 0,247 para 0,292, e cresce com o horizonte, porque as variáveis ficam constantes no último valor conhecido. Ele só foi melhor em 2017–2019 (acertou mais que o ARIMA em 70% dos meses), quando a queda do dólar e o juro real alto anteciparam a inflação baixa.
 - **O efeito do juro real não é identificável nesses dados.** No SARIMAX ajustado com todo o histórico, o coeficiente do juro real é +0,015 p.p. por ponto (p-valor 0,13, intervalo de 95% de −0,004 a +0,034): positivo e não significativo. A causalidade corre nos dois sentidos, porque o Banco Central sobe a Selic quando a inflação sobe. O repasse do dólar tem o sinal esperado: +0,003 p.p. no IPCA mensal por ponto de alta em 12 meses (p-valor 0,09); no modelo ampliado, +0,006 (p-valor 0,01). Os parâmetros ficam em `gold.parametros_arima`.
 - **O Ridge do acumulado em 12 meses é instável:** retreinado com todo o histórico, o coeficiente do juro real sai positivo, ao contrário do esperado.
-- **Modelo oficial: ARIMA.** Por ter o menor erro na validação, ele fornece a previsão oficial (`previsao_oficial`) e a faixa de incerteza. Os demais modelos continuam sendo treinados e gravados para comparação. A constante `MODELO_OFICIAL` do notebook define essa escolha.
 
 ### Previsão atual e faixa de incerteza
 
-Depois da validação, os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente. A faixa de 80% soma à previsão oficial (ARIMA) os quantis de 10% e 90% dos erros do ARIMA em todos os anos de teste.
+Depois da validação, os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente, com a pesquisa Focus mais recente disponível no dia do treino. A faixa de 80% soma à previsão oficial os quantis de 10% e 90% dos erros dela em todos os anos de teste.
 
 ### Tabelas gravadas
 
 | Tabela | Conteúdo |
 |---|---|
+| `gold.correcao_modelo` | Correção do modelo oficial: `intercepto`, `coeficiente_revisao`, `alpha`, `n_treino`, `revisao_atual` e `ajuste_atual` |
 | `gold.parametros_arima` | Parâmetros do ARIMA e dos SARIMAX ajustados com todo o histórico (termos ARIMA e variáveis externas), com erro padrão, p-valor e intervalo de 95% |
 | `gold.coeficientes_modelo` | Por alvo: `intercepto` e um coeficiente por feature do Ridge, em unidades originais (`previsao = intercepto + soma(coeficiente × feature)`), mais `alpha`, `erro_p10` e `erro_p90` do Ridge |
 | `gold.metricas_modelo` | MAE, RMSE e quantidade de meses de teste por alvo, modelo e período (`2005 em diante`, `2005-2016`, `2017-2019`, `2020-2021`, `2022 em diante`) |
-| `gold.previsoes_ipca` | `tipo = previsao`: os 13 alvos a partir do último mês base, com a previsão oficial (`previsao_oficial`, do ARIMA), a faixa de 80% e a previsão de cada modelo. `tipo = teste`: previsto × realizado de cada modelo em cada ano de teste, com o período |
+| `gold.previsoes_ipca` | `tipo = previsao`: os 13 alvos a partir do último mês base, com a previsão oficial (`previsao_oficial`), a faixa de 80% e a previsão de cada modelo. `tipo = teste`: previsto × realizado de cada modelo em cada ano de teste, com o período |
 
-As quatro tabelas são recriadas a cada treino e trazem `run_id` (execução do MLflow) e `treinado_em`.
+As cinco tabelas são recriadas a cada treino e trazem `run_id` (execução do MLflow) e `treinado_em`.
 
 ## Jobs
 
@@ -321,10 +359,11 @@ Job para rodar sem acompanhamento, com a seguinte configuração:
 | Configuração | Valor |
 |---|---|
 | Tarefa 1 — `ingestao_diaria` | Notebook `databricks/notebooks/ingestao_diaria_bacen.py`, compute serverless |
-| Tarefa 2 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente da tarefa 1 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
-| Tarefa 3 — `treino_modelo` | Notebook `databricks/notebooks/treino_modelo_ipca.py`, compute serverless, depois da atualização do pipeline: retreina o modelo e atualiza as previsões |
+| Tarefa 2 — `ingestao_focus` | Notebook `databricks/notebooks/ingestao_focus.py`, compute serverless |
+| Tarefa 3 — `atualiza_pipeline` | Tipo *Pipeline*, apontando para o Spark Declarative Pipeline, dependente das tarefas 1 e 2 com condição *All done* (atualiza o que foi gravado mesmo se uma série falhar) |
+| Tarefa 4 — `treino_modelo` | Notebook `databricks/notebooks/treino_modelo_ipca.py`, compute serverless, depois da atualização do pipeline: retreina o modelo e atualiza as previsões |
 | Agendamento | Diário às 21:00, fuso `America/Sao_Paulo` (após a publicação da PTAX e dos indicadores do dia) |
-| Retentativas | 2 retentativas na tarefa 1, com intervalo de 10 minutos |
+| Retentativas | 2 retentativas nas tarefas 1 e 2, com intervalo de 10 minutos |
 | Notificações | E-mail em caso de falha (para o usuário dono do token usado no deploy) |
 | Execuções simultâneas | No máximo 1 |
 

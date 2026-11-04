@@ -33,6 +33,6 @@ def tabelas_do_treino():
 def test_catalogo_documenta_todas_as_tabelas():
     secoes = set(re.findall(r"^#+ [\d.]+ `([\w.]+)`", CATALOGO.read_text(encoding="utf-8"), re.M))
     esperadas = tabelas_do_pipeline() | tabelas_do_treino()
-    assert len(tabelas_do_treino()) == 4
+    assert len(tabelas_do_treino()) == 5
     faltando = esperadas - secoes
     assert not faltando, f"Tabelas sem seção no catálogo: {sorted(faltando)}"

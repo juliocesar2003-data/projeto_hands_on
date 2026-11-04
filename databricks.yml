@@ -32,7 +32,7 @@ resources:
 
     ingestao_diaria_bacen:
       name: Ingestão Diária BACEN (Agendada)
-      description: Ingestão diária incremental da API do BACEN, atualização do pipeline e treino do modelo de previsão do IPCA.
+      description: Ingestão diária incremental das séries e do Boletim Focus, atualização do pipeline e treino do modelo de previsão do IPCA.
       max_concurrent_runs: 1
       schedule:
         quartz_cron_expression: "0 0 21 * * ?"
@@ -47,9 +47,15 @@ resources:
             notebook_path: ./databricks/notebooks/ingestao_diaria_bacen.py
           max_retries: 2
           min_retry_interval_millis: 600000
+        - task_key: ingestao_focus
+          notebook_task:
+            notebook_path: ./databricks/notebooks/ingestao_focus.py
+          max_retries: 2
+          min_retry_interval_millis: 600000
         - task_key: atualiza_pipeline
           depends_on:
             - task_key: ingestao_diaria
+            - task_key: ingestao_focus
           # Updates whatever was written even if one series failed
           run_if: ALL_DONE
           pipeline_task:

@@ -10,22 +10,26 @@
 # MAGIC | `ultimo_mes` | Referência | Repete o IPCA do mês base (ou o acumulado em 12 meses) |
 # MAGIC | `media_movel_3m`, `_6m`, `_12m` | Referência | Média do IPCA dos últimos 3, 6 ou 12 meses, repetida para os meses seguintes |
 # MAGIC | `sazonal` | Referência | Média histórica do mês do calendário previsto |
-# MAGIC | `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA, com a ordem escolhida por AIC antes do primeiro ano de teste. **Modelo oficial**: menor erro na validação |
+# MAGIC | `arima` | Série temporal | SARIMA ajustado só no histórico do IPCA, com a ordem escolhida por AIC antes do primeiro ano de teste |
 # MAGIC | `sarimax`, `sarimax_ampliado` | Série temporal | O mesmo SARIMA com variáveis externas do mês anterior: juro real e dólar (e, no ampliado, variação da Selic e do dólar em 3 meses). Nas previsões, elas ficam constantes no último valor conhecido, como num cenário do simulador |
 # MAGIC | `ridge` | Regressão | Regressão linear com regularização, para comparação; os coeficientes vão para `gold.coeficientes_modelo` |
 # MAGIC | `random_forest` | Regressão | Comparação não linear com todas as features |
+# MAGIC | `focus`, `top5` | Mercado | Mediana das expectativas do Boletim Focus e do ranking Top 5 de curto prazo, só com as pesquisas publicadas até o dia 5 do mês seguinte ao mês base |
+# MAGIC | `media_tres` | Combinação | Média simples de ARIMA, Focus e Top 5 |
+# MAGIC | `media_tres_corrigida` | Combinação | **Modelo oficial**: a média simples, com uma correção em `h1` proporcional à revisão do Top 5 nas últimas 4 semanas (o mercado costuma reagir devagar às notícias) |
 # MAGIC
 # MAGIC **Validação (origem móvel anual):** para cada ano de teste, de 2005 até o ano atual, os modelos são treinados só com meses cujo alvo é anterior a esse ano e testados nos meses base do ano. O erro é resumido por período: 2005–2016, 2017–2019 (inflação baixa e estável), 2020–2021 (pandemia) e 2022 em diante. Métricas e parâmetros ficam registrados no MLflow.
 # MAGIC
-# MAGIC **Previsão atual:** os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente. A previsão oficial (`previsao_oficial`) é a do ARIMA, e a faixa de incerteza (80%) vem dos erros dele em todos os anos de teste.
+# MAGIC **Previsão atual:** os modelos são reajustados com todo o histórico e aplicados ao mês base mais recente, com a pesquisa Focus mais recente disponível. A previsão oficial está em `previsao_oficial`, e a faixa de incerteza (80%) vem dos erros dela em todos os anos de teste.
 # MAGIC
-# MAGIC Tabelas gravadas: `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.parametros_arima` e `gold.coeficientes_modelo`.
+# MAGIC Tabelas gravadas: `gold.previsoes_ipca`, `gold.metricas_modelo`, `gold.correcao_modelo`, `gold.parametros_arima` e `gold.coeficientes_modelo`.
 
 # COMMAND ----------
 
 # DBTITLE 1,Parameters
 # Origem e destino; o teste em sandbox aponta para outras tabelas e usa um prefixo para não tocar na gold
 dbutils.widgets.text("origem", "projeto_hands_on.gold.features_mensal", "Tabela de features")
+dbutils.widgets.text("expectativas", "projeto_hands_on.silver.focus_ipca", "Tabela de expectativas do Focus")
 dbutils.widgets.text("destino", "projeto_hands_on.gold", "Catálogo.schema de destino")
 dbutils.widgets.text("prefixo_tabela", "", "Prefixo das tabelas de saída")
 # "sim" retreina mesmo sem IPCA novo (por exemplo, depois de mudar o código do modelo)
@@ -43,13 +47,14 @@ import numpy as np
 import pandas as pd
 from pyspark.sql.functions import col, date_trunc, isnan, max_by, when
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 ORIGEM = dbutils.widgets.get("origem").strip()
+FOCUS_SILVER = dbutils.widgets.get("expectativas").strip()
 DESTINO = dbutils.widgets.get("destino").strip()
 PREFIXO = dbutils.widgets.get("prefixo_tabela").strip()
 FORCAR_TREINO = dbutils.widgets.get("forcar_treino") == "sim"
@@ -82,8 +87,10 @@ EXOGENAS_SARIMAX = {
     "sarimax_ampliado": ["juro_real_12m", "selic_var_12m_pp", "usd_var_3m", "usd_var_12m"],
 }
 SERIES_TEMPORAIS = ["arima", *EXOGENAS_SARIMAX]
-MODELOS = ["ultimo_mes", "media_movel_3m", "media_movel_6m", "media_movel_12m", "sazonal", *SERIES_TEMPORAIS,
-           "ridge", "random_forest"]
+# Modelos treinados só com os dados do projeto
+MODELOS_BASE = ["ultimo_mes", "media_movel_3m", "media_movel_6m", "media_movel_12m", "sazonal", *SERIES_TEMPORAIS,
+                "ridge", "random_forest"]
+MODELOS = [*MODELOS_BASE, "focus", "top5", "media_tres", "media_tres_corrigida"]
 
 # Features do Ridge: poucas, interpretáveis e calculáveis a partir dos parâmetros do simulador (Selic e dólar).
 # "ipca_sazonal" é a média histórica do mês previsto (ipca_sazonal_hN do horizonte, ou a composta dos 12 meses).
@@ -122,8 +129,15 @@ PARAMS_RF = {"n_estimators": 300, "min_samples_leaf": 3, "random_state": 42, "n_
 # Ordens candidatas do ARIMA: (p, d, q) e sazonal (P, D, Q, 12). O IPCA mensal é estacionário no período, então d = 0
 ORDENS_ARIMA = [(p, 0, q) for p in range(3) for q in range(3)]
 SAZONAIS_ARIMA = [(0, 0, 0, 12), (1, 0, 0, 12), (0, 0, 1, 12), (1, 0, 1, 12)]
-# Modelo da previsão oficial: o ARIMA teve o menor erro na validação ano a ano (2005 em diante)
-MODELO_OFICIAL = "arima"
+# Modelo da previsão oficial: média simples de ARIMA, Focus e Top 5, com correção pela revisão do Top 5 em h1.
+# Os horizontes corrigidos foram os que reduziram o erro em 2005-2016, confirmados depois em 2017 em diante
+MODELO_OFICIAL = "media_tres_corrigida"
+ALVOS_CORRIGIDOS = ["h1"]
+ALPHA_CORRECAO = 50.0
+# O histórico da correção começa em 2002: o ARIMA precisa de alguns anos de treino, e o Top 5 começa em 11/2001
+PRIMEIRO_ANO_CORRECAO = 2002
+JANELA_REVISAO_DIAS = 28
+MAXIMO_DIAS_PESQUISA = 45
 # Faixa de incerteza de 80%: quantis 10% e 90% dos erros do modelo nos testes
 QUANTIS_FAIXA = (0.10, 0.90)
 
@@ -257,6 +271,76 @@ def previsao_arima_alvo(previsoes, origem, alvo):
     return float(compor(valores)) if alvo == "acum_12m" else float(valores[meses_a_frente(alvo) - 1])
 
 
+def indexar_expectativas(df):
+    """Groups the surveys of one source by reference month, sorted by survey date."""
+    return {ref: g.sort_values("data_pesquisa") for ref, g in df.groupby("mes_referencia")}
+
+
+def expectativa_em(indice, referencia, limite, maximo_dias=MAXIMO_DIAS_PESQUISA):
+    """Median expectation for the reference month in the last survey published up to `limite`."""
+    g = indice.get(referencia)
+    if g is None:
+        return np.nan
+    i = g["data_pesquisa"].searchsorted(limite, side="right") - 1
+    if i < 0 or (limite - g["data_pesquisa"].iloc[i]).days > maximo_dias:
+        return np.nan
+    return float(g["mediana"].iloc[i])
+
+
+def limite_pesquisa(mes_base):
+    """Day 5 of the month after the base month: the last survey date a test forecast may use."""
+    return mes_base + pd.DateOffset(months=1, days=4)
+
+
+def linhas_mercado(mes_base, arima, indice_focus, indice_top5, ipca, limite):
+    """One row per target with ARIMA, Focus, Top 5 and the 4-week Top 5 revision known at `limite`."""
+    meses = [mes_base + pd.DateOffset(months=h) for h in HORIZONTES]
+    antes = limite - pd.Timedelta(days=JANELA_REVISAO_DIAS)
+    focus = [expectativa_em(indice_focus, m, limite) for m in meses]
+    top5_bruto = [expectativa_em(indice_top5, m, limite) for m in meses]
+    top5_antes = [expectativa_em(indice_top5, m, antes) for m in meses]
+    # Na série de 2002 a 2004 o Top 5 não cobre todos os horizontes: nesses casos vale o Focus
+    top5 = [f if np.isnan(t) else t for t, f in zip(top5_bruto, focus)]
+    reais = [ipca.get(m, np.nan) for m in meses]
+    linhas = [
+        {"alvo": f"h{h}", "mes_base": mes_base, "mes_previsto": meses[h - 1], "y": reais[h - 1], "arima": float(arima[h - 1]),
+         "focus": focus[h - 1], "top5": top5[h - 1], "revisao_top5": top5_bruto[h - 1] - top5_antes[h - 1]}
+        for h in HORIZONTES
+    ]
+    linhas.append({
+        "alvo": "acum_12m", "mes_base": mes_base, "mes_previsto": meses[-1],
+        "y": float(compor(reais)) if not np.isnan(reais).any() else np.nan, "arima": float(compor(arima)),
+        "focus": float(compor(focus)), "top5": float(compor(top5)), "revisao_top5": np.nan,
+    })
+    return linhas
+
+
+def nova_correcao():
+    return make_pipeline(StandardScaler(), Ridge(alpha=ALPHA_CORRECAO))
+
+
+def ajustar_correcao(historico):
+    """Fits the error of the simple average on the Top 5 revision, using rows with a known target and revision."""
+    base = historico[historico["y"].notna() & historico["revisao_top5"].notna()]
+    return nova_correcao().fit(base[["revisao_top5"]], base["y"] - base["media_tres"]), base
+
+
+def media_corrigida(painel, anos):
+    """Simple average plus, on the corrected targets, the correction fitted only with months before each year."""
+    resultado = painel["media_tres"].copy()
+    for alvo in ALVOS_CORRIGIDOS:
+        do_alvo = painel[painel["alvo"] == alvo]
+        for ano in anos:
+            passado = do_alvo[do_alvo["mes_previsto"] < pd.Timestamp(year=ano, month=1, day=1)]
+            teste = do_alvo[do_alvo["mes_base"].dt.year == ano]
+            if teste.empty:
+                continue
+            modelo, base = ajustar_correcao(passado)
+            revisao = teste[["revisao_top5"]].fillna(base["revisao_top5"].mean())
+            resultado.loc[teste.index] = teste["media_tres"] + modelo.predict(revisao)
+    return resultado
+
+
 def novo_ridge():
     return make_pipeline(StandardScaler(), RidgeCV(alphas=ALPHAS_RIDGE, cv=TimeSeriesSplit(n_splits=5)))
 
@@ -360,11 +444,13 @@ print(f"ARIMA escolhido: order={ordem_arima}, seasonal_order={sazonal_arima}")
 
 preparados = {alvo: preparar(features, alvo) for alvo in ALVOS}
 linhas_teste = []
+arima_por_origem = {}
 
 for ano in anos_teste:
     fim_treino = pd.Timestamp(year=ano - 1, month=12, day=1)
     origens = list(features.loc[features["mes_base"].dt.year == ano, "mes_base"])
     temporais = {"arima": previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, fim_treino, origens)}
+    arima_por_origem.update(temporais["arima"])
     for modelo, colunas in EXOGENAS_SARIMAX.items():
         temporais[modelo] = previsoes_arima(serie_sarimax, ordem_arima, sazonal_arima, fim_treino, origens,
                                             exog=exogenas[colunas])
@@ -376,7 +462,7 @@ for ano in anos_teste:
         ridge = novo_ridge().fit(treino[FEATURES_LINEAR], treino["y"])
         rf = RandomForestRegressor(**PARAMS_RF).fit(treino[FEATURES_RF], treino["y"])
         previstos = {modelo: np.asarray(previsao_referencia(teste, alvo, modelo), dtype=float)
-                     for modelo in MODELOS if modelo not in (*SERIES_TEMPORAIS, "ridge", "random_forest")}
+                     for modelo in MODELOS_BASE if modelo not in (*SERIES_TEMPORAIS, "ridge", "random_forest")}
         for modelo, previsoes in temporais.items():
             previstos[modelo] = np.array([previsao_arima_alvo(previsoes, o, alvo) for o in teste["mes_base"]])
         previstos["ridge"] = ridge.predict(teste[FEATURES_LINEAR])
@@ -391,11 +477,39 @@ for ano in anos_teste:
                 "mes_previsto": mes_previsto,
                 "periodo": periodo_de(mes_previsto),
                 "valor_real": float(linha["y"]),
-                **{f"previsao_{modelo}": float(previstos[modelo][i]) for modelo in MODELOS},
+                **{f"previsao_{modelo}": float(previstos[modelo][i]) for modelo in MODELOS_BASE},
             })
     print(f"{ano}: {len(origens)} meses base testados")
 
 backtest = pd.DataFrame(linhas_teste)
+
+# COMMAND ----------
+
+# DBTITLE 1,Market Expectations and Official Model
+expectativas = spark.read.table(FOCUS_SILVER).toPandas()
+for coluna in ("data_pesquisa", "mes_referencia"):
+    expectativas[coluna] = pd.to_datetime(expectativas[coluna])
+indice_focus = indexar_expectativas(expectativas[expectativas["fonte"] == "focus"])
+indice_top5 = indexar_expectativas(expectativas[expectativas["fonte"] == "top5"])
+
+# ARIMA dos anos anteriores ao primeiro teste, só para formar o histórico de erros que treina a correção
+for ano in range(PRIMEIRO_ANO_CORRECAO, PRIMEIRO_ANO_TESTE):
+    origens = list(serie_ipca.index[serie_ipca.index.year == ano])
+    fim_treino = pd.Timestamp(year=ano - 1, month=12, day=1)
+    arima_por_origem.update(previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, fim_treino, origens))
+
+painel = pd.DataFrame([
+    linha for origem in sorted(arima_por_origem)
+    for linha in linhas_mercado(origem, arima_por_origem[origem], indice_focus, indice_top5, serie_ipca, limite_pesquisa(origem))
+])
+painel["media_tres"] = painel[["arima", "focus", "top5"]].mean(axis=1, skipna=False)
+painel["media_tres_corrigida"] = media_corrigida(painel, anos_teste)
+
+colunas_mercado = {"focus": "previsao_focus", "top5": "previsao_top5", "media_tres": "previsao_media_tres",
+                   "media_tres_corrigida": "previsao_media_tres_corrigida"}
+backtest = backtest.merge(painel[["mes_base", "alvo", *colunas_mercado]].rename(columns=colunas_mercado),
+                          on=["mes_base", "alvo"], how="left", validate="one_to_one")
+assert backtest[list(colunas_mercado.values())].notna().all().all(), "Há previsões de teste sem expectativa do Focus"
 backtest["previsao_oficial"] = backtest[f"previsao_{MODELO_OFICIAL}"]
 
 # COMMAND ----------
@@ -446,6 +560,26 @@ mlflow.log_text(tabela_metricas.to_csv(index=False), "metricas.csv")
 
 # DBTITLE 1,Final Models and Current Forecast
 temporais_final = {"arima": previsoes_arima(serie_ipca, ordem_arima, sazonal_arima, mes_base_atual, [mes_base_atual])}
+# Previsão atual: usa a pesquisa mais recente disponível no dia do treino
+mercado_atual = pd.DataFrame(linhas_mercado(mes_base_atual, temporais_final["arima"][mes_base_atual], indice_focus, indice_top5,
+                                            serie_ipca, pd.Timestamp(agora.date()))).set_index("alvo")
+mercado_atual["media_tres"] = mercado_atual[["arima", "focus", "top5"]].mean(axis=1, skipna=False)
+assert mercado_atual["media_tres"].notna().all(), f"Sem pesquisa recente do Focus em {FOCUS_SILVER}"
+mercado_atual["media_tres_corrigida"] = mercado_atual["media_tres"]
+linhas_correcao = []
+for alvo in ALVOS_CORRIGIDOS:
+    modelo_correcao, base_correcao = ajustar_correcao(painel[painel["alvo"] == alvo])
+    intercepto_correcao, coeficientes_correcao = coeficientes_originais(modelo_correcao, ["revisao_top5"])
+    revisao_atual = mercado_atual.loc[alvo, "revisao_top5"]
+    revisao_usada = base_correcao["revisao_top5"].mean() if np.isnan(revisao_atual) else revisao_atual
+    ajuste_atual = intercepto_correcao + coeficientes_correcao["revisao_top5"] * revisao_usada
+    mercado_atual.loc[alvo, "media_tres_corrigida"] = mercado_atual.loc[alvo, "media_tres"] + ajuste_atual
+    linhas_correcao.append({"alvo": alvo, "intercepto": intercepto_correcao, "coeficiente_revisao": coeficientes_correcao["revisao_top5"],
+                            "alpha": ALPHA_CORRECAO, "n_treino": len(base_correcao), "revisao_atual": revisao_usada,
+                            "ajuste_atual": ajuste_atual})
+tabela_correcao = pd.DataFrame(linhas_correcao)
+display(tabela_correcao.round(4))
+
 parametros = [
     parametros_sarimax(ajustar_arima(serie_ipca, ordem_arima, sazonal_arima)).assign(modelo="arima",
                                                                                     n_meses=len(serie_ipca))
@@ -485,7 +619,7 @@ for alvo, dados in preparados.items():
 
     atual = dados[dados["mes_base"] == mes_base_atual]
     temporais_atuais = {f"previsao_{m}": previsao_arima_alvo(p, mes_base_atual, alvo) for m, p in temporais_final.items()}
-    previsao_oficial = temporais_atuais[f"previsao_{MODELO_OFICIAL}"]
+    previsao_oficial = float(mercado_atual.loc[alvo, MODELO_OFICIAL])
     linhas_previsao.append({
         "tipo": "previsao",
         "mes_base": mes_base_atual,
@@ -494,10 +628,11 @@ for alvo, dados in preparados.items():
         "periodo": None,
         "valor_real": None,
         **{f"previsao_{m}": float(np.asarray(previsao_referencia(atual, alvo, m))[0])
-           for m in MODELOS if m not in (*SERIES_TEMPORAIS, "ridge", "random_forest")},
+           for m in MODELOS_BASE if m not in (*SERIES_TEMPORAIS, "ridge", "random_forest")},
         **temporais_atuais,
         "previsao_ridge": float(ridge_final.predict(atual[FEATURES_LINEAR])[0]),
         "previsao_random_forest": float(rf_final.predict(atual[FEATURES_RF])[0]),
+        **{f"previsao_{m}": float(mercado_atual.loc[alvo, m]) for m in ("focus", "top5", "media_tres", "media_tres_corrigida")},
         "previsao_oficial": previsao_oficial,
         "limite_inferior": previsao_oficial + inferior,
         "limite_superior": previsao_oficial + superior,
@@ -508,13 +643,14 @@ for alvo, dados in preparados.items():
 mlflow.log_text(pd.DataFrame(linhas_coeficientes).to_csv(index=False), "coeficientes_ridge.csv")
 mlflow.log_text(pd.DataFrame(importancias).to_csv(index=False), "importancia_random_forest.csv")
 mlflow.log_text(tabela_parametros.to_csv(index=False), "parametros_arima.csv")
+mlflow.log_text(tabela_correcao.to_csv(index=False), "correcao_modelo.csv")
 run_id = run.info.run_id
 mlflow.end_run()
 print(f"MLflow run: {run_id}")
 
 previsao_atual = pd.DataFrame(linhas_previsao)
 display(previsao_atual[["alvo", "mes_previsto", "previsao_oficial", "limite_inferior", "limite_superior",
-                        "previsao_sarimax", "previsao_ridge", "previsao_sazonal"]].round(3))
+                        "previsao_arima", "previsao_focus", "previsao_top5"]].round(3))
 
 # COMMAND ----------
 
@@ -556,8 +692,14 @@ gravar(
     tabela_parametros[["modelo", "parametro", "coeficiente", "erro_padrao", "p_valor", "ic95_inferior", "ic95_superior",
                        "n_meses"]],
     "parametros_arima",
-    "Parâmetros do ARIMA (modelo oficial) e dos SARIMAX ajustados com todo o histórico: termos ARIMA e "
+    "Parâmetros do ARIMA, um dos componentes do modelo oficial, e dos SARIMAX, ajustados com todo o histórico: termos ARIMA e "
     "variáveis externas (mês anterior), com erro padrão, p-valor e intervalo de 95%",
+)
+gravar(
+    tabela_correcao,
+    "correcao_modelo",
+    "Correção do modelo oficial: ajuste = intercepto + coeficiente_revisao * revisão do Top 5 em 4 semanas, somado à "
+    "média de ARIMA, Focus e Top 5 nos alvos listados",
 )
 gravar(
     tabela_metricas,
@@ -567,6 +709,7 @@ gravar(
 gravar(
     previsoes,
     "previsoes_ipca",
-    "Previsões do IPCA (%): previsao_oficial = ARIMA; tipo previsao = a partir do último mês base, com faixa de 80%; "
+    "Previsões do IPCA (%): previsao_oficial = média de ARIMA, Focus e Top 5, com correção em h1; "
+    "tipo previsao = a partir do último mês base, com faixa de 80%; "
     "tipo teste = previsto x realizado de cada modelo na validação com origem móvel anual",
 )

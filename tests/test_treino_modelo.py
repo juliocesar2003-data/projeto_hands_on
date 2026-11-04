@@ -251,7 +251,7 @@ def test_alinhar_descarta_meses_sem_todas_as_exogenas(fx):
     assert defasadas.notna().all().all() and defasadas["a"].iloc[0] == 3.0
 
 
-def test_modelo_oficial_e_o_arima():
-    # A previsão oficial e a faixa de incerteza vêm do modelo com menor erro na validação ano a ano
-    assert carregar_constante(NOTEBOOK, "MODELO_OFICIAL") == "arima"
-    assert 'SERIES_TEMPORAIS = ["arima"' in NOTEBOOK.read_text(encoding="utf-8")
+def test_modelo_oficial_e_a_media_corrigida_so_em_h1():
+    assert carregar_constante(NOTEBOOK, "MODELO_OFICIAL") == "media_tres_corrigida"
+    assert carregar_constante(NOTEBOOK, "ALVOS_CORRIGIDOS") == ["h1"]
+    assert '"media_tres_corrigida"]' in NOTEBOOK.read_text(encoding="utf-8")
