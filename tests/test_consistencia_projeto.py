@@ -56,6 +56,16 @@ def test_notebooks_mantem_formato_databricks(notebook):
     assert notebook.read_text(encoding="utf-8").startswith("# Databricks notebook source")
 
 
+def test_treino_instala_o_statsmodels_testado():
+    # The serverless environment of a job does not include statsmodels, so the notebook must install it
+    treino = (NOTEBOOKS / "treino_modelo_ipca.py").read_text(encoding="utf-8")
+    requisitos = (RAIZ / "requirements-dev.txt").read_text(encoding="utf-8")
+    versao = re.search(r"^statsmodels==(\S+)$", requisitos, re.M).group(1)
+    instalacao = re.search(r"^# MAGIC %pip install statsmodels==(\S+)", treino, re.M)
+    assert instalacao and instalacao.group(1) == versao
+    assert instalacao.start() < treino.index("dbutils.widgets")
+
+
 def test_bundle_aponta_para_arquivos_existentes():
     bundle = yaml.safe_load((RAIZ / "databricks.yml").read_text(encoding="utf-8"))
     jobs = bundle["resources"]["jobs"]

@@ -26,6 +26,11 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Dependencies
+# MAGIC %pip install statsmodels==0.15.0 --quiet
+
+# COMMAND ----------
+
 # DBTITLE 1,Parameters
 # Origem e destino; o teste em sandbox aponta para outras tabelas e usa um prefixo para não tocar na gold
 dbutils.widgets.text("origem", "projeto_hands_on.gold.features_mensal", "Tabela de features")
