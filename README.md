@@ -63,6 +63,7 @@ pyproject.toml                       # Configuração do ruff e do pytest
 requirements-dev.txt                 # Dependências de desenvolvimento (CI e testes locais)
 tests/                               # Testes unitários (rodam sem Databricks)
 docs/                                # Documentação e materiais de apresentação (não executáveis)
+├── apresentacao_ml.md               # Resumo do modelo de previsão do IPCA para apresentar à sala
 ├── catalogo_dados.md                # Catálogo e dicionário de dados (tabelas, colunas, regras e linhagem)
 ├── comparacao_modelos.md            # Resumo da comparação dos modelos de previsão do IPCA e do modelo oficial
 ├── dashboard_bacen.pbix             # Dashboard exploratório no Power BI (câmbio, juros, inflação e qualidade)
