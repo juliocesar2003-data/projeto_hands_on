@@ -63,8 +63,9 @@ pyproject.toml                       # Configuração do ruff e do pytest
 requirements-dev.txt                 # Dependências de desenvolvimento (CI e testes locais)
 tests/                               # Testes unitários (rodam sem Databricks)
 docs/                                # Documentação e materiais de apresentação (não executáveis)
+├── apresentacao_ml.md               # Resumo do modelo de previsão do IPCA para apresentar à sala
 ├── catalogo_dados.md                # Catálogo e dicionário de dados (tabelas, colunas, regras e linhagem)
-├── comparacao_modelos.md            # Resumo da comparação dos modelos de previsão do IPCA e do modelo oficial
+├── comparacao_modelos.md            # Resultados do modelo oficial de previsão do IPCA em relação ao Focus
 ├── dashboard_bacen.pbix             # Dashboard exploratório no Power BI (câmbio, juros, inflação e qualidade)
 └── EDA Bacen_2026_View.pdf          # Exportação em PDF do dashboard do Power BI
 databricks/
@@ -315,7 +316,7 @@ MAE médio de h1 a h12 (p.p.; menor é melhor):
 | Random Forest | 0,315 | 0,266 | 0,315 | 0,369 | 0,410 |
 | Último mês | 0,322 | 0,273 | 0,297 | 0,433 | 0,411 |
 
-R² do modelo oficial contra o ARIMA: 0,64 contra 0,29 em `h1`, 0,28 contra 0,12 em `h2`, 0,18 contra 0,03 em `h3` e 0,09 contra 0,01 em `h12`.
+R² do modelo oficial contra o ARIMA: 0,63 contra 0,29 em `h1`, 0,27 contra 0,11 em `h2`, 0,18 contra 0,03 em `h3` e 0,09 contra 0,00 em `h12`.
 
 IPCA acumulado em 12 meses (MAE em p.p.): modelo oficial 1,452; Top 5 1,513; Focus 1,521; ARIMA 1,735; sazonal 1,946; último mês 2,014; Ridge 2,405; SARIMAX 2,538; SARIMAX ampliado 2,573; Random Forest 3,223.
 
